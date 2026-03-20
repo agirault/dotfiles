@@ -27,3 +27,7 @@ for f in "$env_dir"/*.env; do
     done < "$f"
 done
 export PATH
+
+# Source shared login script (POSIX, shared with fish)
+login_script="$env_dir/login.sh"
+[ -r "$login_script" ] && . "$login_script"

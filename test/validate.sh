@@ -32,10 +32,8 @@ if [[ "$phase" == "install" ]]; then
     check ".claude/CLAUDE.md is a symlink" test -L "$HOME/.claude/CLAUDE.md"
     check ".claude/executable_statusline.sh is a symlink" test -L "$HOME/.claude/executable_statusline.sh"
     check ".bashrc.d/00-env-loader.sh is a symlink" test -L "$HOME/.bashrc.d/00-env-loader.sh"
-    check ".bashrc.d/02-fastfetch.sh is a symlink" test -L "$HOME/.bashrc.d/02-fastfetch.sh"
-    check ".config/env/path.env is a symlink" test -L "$HOME/.config/env/path.env"
-    check ".config/env/aliases.env is a symlink" test -L "$HOME/.config/env/aliases.env"
-    check ".config/env/exports.env is a symlink" test -L "$HOME/.config/env/exports.env"
+    check ".config/env/env.conf is a symlink" test -L "$HOME/.config/env/env.conf"
+    check ".config/env/login.sh is a symlink" test -L "$HOME/.config/env/login.sh"
     check ".local/bin/cw is a symlink" test -L "$HOME/.local/bin/cw"
 
     # Backups created for pre-existing files
@@ -61,12 +59,9 @@ if [[ "$phase" == "install" ]]; then
     check "fzf is installed" command -v fzf
     check "git is installed" command -v git
 
-    # Fish env loader parses correctly (dry run)
-    echo "-- Fish env loader --"
+    # Syntax checks
+    echo "-- Syntax --"
     check "env_loader.fish has no syntax errors" fish -n "$HOME/.config/fish/conf.d/env_loader.fish"
-
-    # Bash env loader parses correctly (dry run)
-    echo "-- Bash env loader --"
     check "00-env-loader.sh has no syntax errors" bash -n "$HOME/.bashrc.d/00-env-loader.sh"
 
 elif [[ "$phase" == "uninstall" ]]; then

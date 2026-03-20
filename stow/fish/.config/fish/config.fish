@@ -1,7 +1,6 @@
 if status is-interactive
-    # Fix SSH agent forwarding for tmux: keep a stable symlink
-    # so reconnected SSH sessions update the agent socket for existing tmux sessions
-    if set -q SSH_AUTH_SOCK; and test "$SSH_AUTH_SOCK" != "$HOME/.ssh/ssh_auth_sock"
-        ln -sf "$SSH_AUTH_SOCK" "$HOME/.ssh/ssh_auth_sock"
-    end
+    # Run shared login script (POSIX, shared with bash)
+    # Executed as subprocess - env changes won't persist, only side-effects
+    set -l login_script "$HOME/.config/env/login.sh"
+    test -r "$login_script"; and bash "$login_script"
 end

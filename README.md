@@ -31,16 +31,22 @@ cd ~/dotfiles
 | Package | Contents |
 |---------|----------|
 | `git` | Aliases, delta pager, difftastic, rebase settings. Identity via `[include]` from `~/.gitconfig.local` |
-| `fish` | Shell config, SSH agent forwarding fix for tmux, shared env loader |
+| `fish` | Shell config, shared env loader |
 | `tools` | Standalone commands in `~/.local/bin/`: `cw` tmux workspace manager (run `cw --help`) |
 | `tmux` | Ctrl-a prefix, mouse, splits (`\`/`-`), OSC52 clipboard, bell notifications, setup docs |
 | `claude` | Claude Code settings, Catppuccin status line, global agent instructions (CLAUDE.md) |
-| `bash` | `.bashrc.d/` snippets: shared env loader, fastfetch |
-| `env` | Shared environment (PATH, aliases, exports) loaded by both bash and fish |
+| `bash` | `.bashrc.d/` snippets: shared env loader, login script sourcer |
+| `env` | Shared environment under `~/.config/env/`: env files and login script |
 
 ## Shared environment
 
-`~/.config/env/*.env` files are sourced by both bash and fish via shell-specific loaders. Supported formats:
+`~/.config/env/` contains configuration shared by both bash and fish, avoiding duplication between the two shells.
+
+### `*.env` - environment data
+
+Declarative files parsed by shell-specific loaders (`env_loader.fish` for fish, `00-env-loader.sh` for bash). Each loader reads the same `.env` files but uses native shell APIs to apply them. Changes take effect in the current shell process.
+
+Supported formats:
 
 ```
 # Comments
@@ -49,6 +55,16 @@ ALIAS name=command       # creates a shell alias
 KEY=value                # exported as environment variable
 KEY=$(command)           # command substitution
 ```
+
+### `login.sh` - interactive shell startup
+
+A single POSIX script **executed on interactive shell startup** by both fish and bash. Bash sources it (`. login.sh`), fish runs it via `bash login.sh` since fish can't parse POSIX syntax.
+
+**Important limitation:** since fish runs this as a subprocess, any environment changes (`export`, `cd`, etc.) inside the script won't affect the calling fish shell - they die with the subprocess. Only use this for side-effect operations (creating files, printing output, etc.). For environment changes, use the `*.env` files instead.
+
+Current contents:
+- SSH agent forwarding fix - creates a stable symlink for tmux
+- System info display via fastfetch
 
 ## Identity
 
