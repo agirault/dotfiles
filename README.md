@@ -42,25 +42,17 @@ cd ~/dotfiles
 
 `~/.config/env/` contains configuration shared by both bash and fish, avoiding duplication between the two shells.
 
-### `*.env` - environment data
+### `env.conf` - environment data
 
-Declarative files parsed by shell-specific loaders (`env_loader.fish` for fish, `00-env-loader.sh` for bash). Each loader reads the same `.env` files but uses native shell APIs to apply them. Changes take effect in the current shell process.
+INI-style config parsed by shell-specific loaders (`env_loader.fish` for fish, `00-env-loader.sh` for bash). Each loader reads the same file but uses native shell APIs to apply it. Changes take effect in the current shell process.
 
-Supported formats:
-
-```
-# Comments
-PATH=/some/path          # prepended to PATH
-ALIAS name=command       # creates a shell alias
-KEY=value                # exported as environment variable
-KEY=$(command)           # command substitution
-```
+Sections: `[prepend]` (prepend to a variable, supports multiple entries), `[export]` (set and export, supports command substitution), `[alias]` (shell aliases). All use `KEY=value` format. See the file itself for current values.
 
 ### `login.sh` - interactive shell startup
 
 A single POSIX script **executed on interactive shell startup** by both fish and bash. Bash sources it (`. login.sh`), fish runs it via `bash login.sh` since fish can't parse POSIX syntax.
 
-**Important limitation:** since fish runs this as a subprocess, any environment changes (`export`, `cd`, etc.) inside the script won't affect the calling fish shell - they die with the subprocess. Only use this for side-effect operations (creating files, printing output, etc.). For environment changes, use the `*.env` files instead.
+**Important limitation:** since fish runs this as a subprocess, any environment changes (`export`, `cd`, etc.) inside the script won't affect the calling fish shell - they die with the subprocess. Only use this for side-effect operations (creating files, printing output, etc.). For environment changes, use `env.conf` instead.
 
 Current contents:
 - SSH agent forwarding fix - creates a stable symlink for tmux

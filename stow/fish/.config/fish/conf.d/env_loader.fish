@@ -1,34 +1,37 @@
-# Load shared environment from ~/.config/env/*.env
-set -l env_dir "$HOME/.config/env"
+# Load shared environment from ~/.config/env/env.conf
+set -l conf "$HOME/.config/env/env.conf"
+test -r "$conf"; or return
 
-for f in $env_dir/*.env
-    test -r "$f"; or continue
-    while read -l line
-        # Skip comments and empty lines
-        string match -qr '^\s*#' -- $line; and continue
-        string match -qr '^\s*$' -- $line; and continue
+set -l section ""
+while read -l line
+    # Skip comments and empty lines
+    string match -qr '^\s*#' -- $line; and continue
+    string match -qr '^\s*$' -- $line; and continue
 
-        # PATH=value -> prepend to PATH
-        if string match -qr '^PATH=(.+)' -- $line
-            set -l val (string replace -r '^PATH=' '' -- $line)
-            # Expand $HOME
-            set val (string replace '$HOME' "$HOME" -- $val)
-            fish_add_path --prepend $val
+    # Section header
+    if string match -qr '^\[(.+)\]$' -- $line
+        set section (string match -r '^\[(.+)\]$' -- $line)[2]
+        continue
+    end
 
-        # ALIAS name=command
-        else if string match -qr '^ALIAS (.+)=(.+)' -- $line
-            set -l parts (string match -r '^ALIAS (.+)=(.+)' -- $line)
-            alias $parts[2] $parts[3]
+    # Parse KEY=value (key must be a valid identifier)
+    set -l parts (string match -r '^([A-Za-z_][A-Za-z0-9_]*)=(.+)$' -- $line)
+    test (count $parts) -ge 3; or continue
+    set -l key $parts[2]
+    set -l val $parts[3]
+    # Evaluate shell expressions ($HOME, $(command), etc.)
+    set val (eval echo "$val")
 
-        # KEY=value -> set -gx KEY value
-        else if string match -qr '^([A-Z_]+)=(.+)' -- $line
-            set -l parts (string match -r '^([A-Z_]+)=(.+)' -- $line)
-            set -l val $parts[3]
-            # Handle $(command) substitution
-            if string match -qr '^\$\((.+)\)$' -- $val
-                set val (eval (string replace -r '^\$\((.+)\)$' '$1' -- $val))
+    switch $section
+        case prepend
+            if test "$key" = PATH
+                fish_add_path --prepend $val
+            else
+                set -gx $key $val $$key
             end
-            set -gx $parts[2] $val
-        end
-    end < $f
-end
+        case export
+            set -gx $key $val
+        case alias
+            alias $key $val
+    end
+end < $conf
