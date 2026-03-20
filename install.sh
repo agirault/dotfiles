@@ -78,12 +78,16 @@ phase_configs() {
             continue
         fi
 
-        # Back up existing non-symlink files that would conflict
+        # Back up existing files that would conflict with stow
+        # Skip symlinks (already stowed) and files inside the repo (tree folding)
         while IFS= read -r target; do
             target="$HOME/$target"
             if [[ -e "$target" && ! -L "$target" ]]; then
-                echo "    Backing up $target -> ${target}.bak"
-                mv "$target" "${target}.bak"
+                real_path=$(readlink -f "$target")
+                if [[ "$real_path" != "$DOTFILES_DIR"/* ]]; then
+                    echo "    Backing up $target -> ${target}.bak"
+                    mv "$target" "${target}.bak"
+                fi
             fi
         done < <(cd "$DOTFILES_DIR/stow/$pkg" && find . -type f | sed 's|^\./||')
 
@@ -133,7 +137,7 @@ phase_uninstall() {
         stow -d "$DOTFILES_DIR/stow" -t "$HOME" -D "$pkg" 2>/dev/null || true
         echo "    Unstowed $pkg"
 
-        # Restore .bak files
+        # Restore .bak files from first-time install
         while IFS= read -r target; do
             target="$HOME/$target"
             if [[ -f "${target}.bak" ]]; then
