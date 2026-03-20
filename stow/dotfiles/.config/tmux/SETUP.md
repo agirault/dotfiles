@@ -17,9 +17,6 @@ Tmux is used to manage persistent terminal sessions on remote Linux boxes, acces
 - **Clipboard:** OSC 52 enabled - mouse selections in tmux copy to Mac clipboard (requires iTerm2 setting below)
 - **Notifications:** `allow-passthrough` lets OSC 9 escape sequences reach iTerm2 through SSH+tmux. `monitor-bell` + `bell-action any` highlights windows with bell activity in the status bar.
 
-### SSH agent forwarding fix
-
-When you SSH with agent forwarding, the socket path changes on each connection. A symlink at `~/.ssh/ssh_auth_sock` always points to the latest socket. This is updated on each SSH login (via `~/.config/shell/scripts/ssh-agent-fix.sh`) and tmux is configured to use it (in `.tmux.conf`).
 
 ## Mac-side setup (iTerm2)
 
