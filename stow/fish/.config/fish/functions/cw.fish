@@ -14,13 +14,14 @@ function cw --description "Create or attach to a tmux workspace"
         # Create a temporary grouped session linked to the main one
         # Each grouped session can independently display a different window
         set -l view "view-"(random)
-        tmux new-session -d -t $sess -s $view
+        # destroy-unattached cleans up the view on detach, SSH drop, or terminal close
+        # Must attach in the same command (-d omitted) so the session isn't destroyed
+        # before a client connects
         if test -n "$win"
-            tmux select-window -t $view:$win
+            tmux new-session -t $sess -s $view \; set-option destroy-unattached on \; select-window -t $win
+        else
+            tmux new-session -t $sess -s $view \; set-option destroy-unattached on
         end
-        tmux attach -t $view
-        # Clean up the view session on detach (windows persist in the main session)
-        tmux kill-session -t $view 2>/dev/null
     end
 
     # --- Ensure main session exists ---
