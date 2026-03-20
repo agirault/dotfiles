@@ -72,7 +72,4 @@ if [[ -n "$gpg_id" ]]; then
     fi
 fi
 
-# Set up git-lfs
-git lfs install 2>/dev/null || true
-
 echo "==> Identity configured."

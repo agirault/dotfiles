@@ -49,7 +49,6 @@ if [[ "$phase" == "install" ]]; then
     echo "-- Content --"
     check ".gitconfig has [include] for .local" grep -q 'path = ~/.gitconfig.local' "$HOME/.gitconfig"
     check ".gitconfig has NO [user] section" ! grep -q '^\[user\]' "$HOME/.gitconfig"
-    check ".gitconfig has NO [filter \"lfs\"]" ! grep -q '\[filter "lfs"\]' "$HOME/.gitconfig"
     check ".claude/settings.json uses ~ not /home/" ! grep -q '/home/' "$HOME/.claude/settings.json"
     check ".bashrc sources .bashrc.d" grep -q 'bashrc.d' "$HOME/.bashrc"
 
