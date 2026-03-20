@@ -56,15 +56,18 @@ INI-style config parsed by shell-specific loaders (`env_loader.fish` for fish, `
 
 Sections: `[prepend]` (prepend to a variable, supports multiple entries), `[export]` (set and export, supports command substitution), `[alias]` (shell aliases). All use `KEY=value` format. See the file itself for current values.
 
-### `login.sh` - interactive shell startup
+### `pre_env.sh` / `post_env.sh` - startup hooks
 
-A single POSIX script **executed on interactive shell startup** by both fish and bash. Bash sources it (`. login.sh`), fish runs it via `bash login.sh` since fish can't parse POSIX syntax.
+POSIX shell scripts executed by the env loader before and after parsing `env.conf`. Bash sources them, fish runs them via `bash` subprocess.
 
-**Important limitation:** since fish runs this as a subprocess, any environment changes (`export`, `cd`, etc.) inside the script won't affect the calling fish shell - they die with the subprocess. Only use this for side-effect operations (creating files, printing output, etc.). For environment changes, use `env.conf` instead.
+- `pre_env.sh` - runs before `env.conf`: SSH agent symlink fix (needs the raw `SSH_AUTH_SOCK` before `env.conf` overrides it)
+- `post_env.sh` - runs after `env.conf`: system info display via fastfetch
 
-Current contents:
-- SSH agent forwarding fix - creates a stable symlink for tmux
-- System info display via fastfetch
+**Important limitation:** since fish runs these as subprocesses, environment changes inside the scripts won't affect the calling fish shell. Only use for side-effect operations. For environment changes, use `env.conf`.
+
+### `ssh-refresh-agent` (in tools)
+
+Manual command to fix SSH agent in stale tmux sessions. Run `ssh-refresh-agent` to find a live socket and update the symlink, or `ssh-refresh-agent --check` to test. Called automatically by `pre_env.sh` on shell startup.
 
 ## Identity
 

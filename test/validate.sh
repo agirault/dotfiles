@@ -33,8 +33,10 @@ if [[ "$phase" == "configs" ]]; then
     check ".claude/executable_statusline.sh is a symlink" test -L "$HOME/.claude/executable_statusline.sh"
     check ".bashrc.d/00-env-loader.sh is a symlink" test -L "$HOME/.bashrc.d/00-env-loader.sh"
     check ".config/env/env.conf is a symlink" test -L "$HOME/.config/env/env.conf"
-    check ".config/env/login.sh is a symlink" test -L "$HOME/.config/env/login.sh"
+    check ".config/env/pre_env.sh is a symlink" test -L "$HOME/.config/env/pre_env.sh"
+    check ".config/env/post_env.sh is a symlink" test -L "$HOME/.config/env/post_env.sh"
     check ".local/bin/cw is a symlink" test -L "$HOME/.local/bin/cw"
+    check ".local/bin/ssh-refresh-agent is a symlink" test -L "$HOME/.local/bin/ssh-refresh-agent"
 
     # Backups created for pre-existing files
     echo "-- Backups --"

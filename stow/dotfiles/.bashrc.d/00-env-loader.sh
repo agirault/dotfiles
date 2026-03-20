@@ -1,43 +1,48 @@
-# Load shared environment from ~/.config/env/env.conf
-conf="$HOME/.config/env/env.conf"
-[ -r "$conf" ] || return 0
+# Load shared environment from ~/.config/env/
+env_dir="$HOME/.config/env"
 
-section=""
-while IFS= read -r line; do
-    # Skip comments and empty lines
-    [[ "$line" =~ ^[[:space:]]*# ]] && continue
-    [[ -z "${line// /}" ]] && continue
+# Pre-env hook: runs before env.conf (e.g., SSH agent symlink fix)
+[ -r "$env_dir/pre_env.sh" ] && . "$env_dir/pre_env.sh"
 
-    # Section header
-    if [[ "$line" =~ ^\[(.+)\]$ ]]; then
-        section="${BASH_REMATCH[1]}"
-        continue
-    fi
+# Parse env.conf
+conf="$env_dir/env.conf"
+if [ -r "$conf" ]; then
+    section=""
+    while IFS= read -r line; do
+        # Skip comments and empty lines
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line// /}" ]] && continue
 
-    # Parse KEY=value (key must be a valid identifier)
-    [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.+)$ ]] || continue
-    key="${BASH_REMATCH[1]}"
-    val="${BASH_REMATCH[2]}"
+        # Section header
+        if [[ "$line" =~ ^\[(.+)\]$ ]]; then
+            section="${BASH_REMATCH[1]}"
+            continue
+        fi
 
-    case "$section" in
-        prepend)
-            eval val="\"$val\""
-            current="${!key}"
-            if [ -n "$current" ]; then
-                export "$key=$val:$current"
-            else
-                export "$key=$val"
-            fi
-            ;;
-        export)
-            eval export "$key=\"$val\""
-            ;;
-        alias)
-            alias "$key=$val"
-            ;;
-    esac
-done < "$conf"
+        # Parse KEY=value (key must be a valid identifier)
+        [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.+)$ ]] || continue
+        key="${BASH_REMATCH[1]}"
+        val="${BASH_REMATCH[2]}"
 
-# Source shared login script
-login_script="$HOME/.config/env/login.sh"
-[ -r "$login_script" ] && . "$login_script"
+        case "$section" in
+            prepend)
+                eval val="\"$val\""
+                current="${!key}"
+                if [ -n "$current" ]; then
+                    export "$key=$val:$current"
+                else
+                    export "$key=$val"
+                fi
+                ;;
+            export)
+                eval export "$key=\"$val\""
+                ;;
+            alias)
+                alias "$key=$val"
+                ;;
+        esac
+    done < "$conf"
+fi
+
+# Post-env hook: runs after env.conf (e.g., fastfetch)
+[ -r "$env_dir/post_env.sh" ] && . "$env_dir/post_env.sh"

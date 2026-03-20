@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# ssh-refresh-agent - Update the SSH agent symlink to a live socket
+#
+# Usage:
+#   ssh-refresh-agent           # find and link a live agent socket
+#   ssh-refresh-agent --check   # just check if the current agent works
+#   . ssh-refresh-agent         # source it to also set SSH_AUTH_SOCK in your shell
+#
+# The stable symlink at ~/.ssh/ssh_auth_sock lets tmux sessions survive
+# SSH reconnects. Run this manually when an existing session loses its
+# agent, or it runs automatically via pre_env.sh on shell startup.
+
+SYMLINK="$HOME/.ssh/ssh_auth_sock"
+
+# --- Helpers ---
+
+is_live_agent() {
+    [ -S "$1" ] && SSH_AUTH_SOCK="$1" ssh-add -l >/dev/null 2>&1
+}
+
+find_live_socket() {
+    find /tmp/ssh-*/agent.* -user "$(id -un)" -type s 2>/dev/null | while read -r sock; do
+        if is_live_agent "$sock"; then
+            echo "$sock"
+            return
+        fi
+    done
+}
+
+is_current_socket_direct() {
+    [ -n "$SSH_AUTH_SOCK" ] && [ "$SSH_AUTH_SOCK" != "$SYMLINK" ]
+}
+
+update_symlink() {
+    ln -sf "$1" "$SYMLINK"
+    echo "Updated: $SYMLINK -> $1"
+}
+
+is_sourced() {
+    [ "${BASH_SOURCE[0]:-}" != "${0}" ] 2>/dev/null || [ -n "${ZSH_EVAL_CONTEXT:-}" ]
+}
+
+# --- Check mode ---
+
+if [ "${1:-}" = "--check" ]; then
+    if [ -z "$SSH_AUTH_SOCK" ]; then
+        echo "SSH_AUTH_SOCK is not set"
+        exit 1
+    fi
+    if is_live_agent "$SSH_AUTH_SOCK"; then
+        echo "Agent OK: $SSH_AUTH_SOCK"
+        exit 0
+    else
+        echo "Agent dead: $SSH_AUTH_SOCK"
+        exit 1
+    fi
+fi
+
+# --- Refresh ---
+
+# Ensure the symlink points to a live socket
+if is_current_socket_direct && is_live_agent "$SSH_AUTH_SOCK"; then
+    # Fresh SSH connection - use the direct socket
+    update_symlink "$SSH_AUTH_SOCK"
+elif ! is_live_agent "$SYMLINK"; then
+    # Symlink is dead or missing - search for a live socket
+    live_sock=$(find_live_socket)
+    if [ -n "$live_sock" ]; then
+        update_symlink "$live_sock"
+    else
+        echo "No live agent socket found"
+        exit 1
+    fi
+fi
+
+if is_current_socket_direct; then
+    # Point SSH_AUTH_SOCK to the stable symlink or instruct the user to do so
+    if is_sourced; then
+        export SSH_AUTH_SOCK="$SYMLINK"
+    else
+        echo "Run '. ${0}' or 'export SSH_AUTH_SOCK=$SYMLINK' or start a new shell."
+    fi
+fi
