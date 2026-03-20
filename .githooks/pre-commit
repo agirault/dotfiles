@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Pre-commit hook: reject files that may contain secrets
+
+set -euo pipefail
+
+PATTERNS=(
+    "PRIVATE KEY"
+    "BEGIN RSA"
+    "BEGIN EC"
+    "BEGIN DSA"
+    "BEGIN OPENSSH"
+    "signingkey\s*="
+    "sk-[a-zA-Z0-9]{20,}"
+    "ghp_[a-zA-Z0-9]{36}"
+    "gho_[a-zA-Z0-9]{36}"
+    "AKIA[0-9A-Z]{16}"
+)
+
+COMBINED=$(IFS='|'; echo "${PATTERNS[*]}")
+
+SELF="$(basename "$(cd "$(dirname "$0")" && pwd)")/$(basename "$0")"
+MATCHES=$(git diff --cached --name-only -z | grep -zv "$SELF" | xargs -0 grep -lE "$COMBINED" 2>/dev/null || true)
+
+if [[ -n "$MATCHES" ]]; then
+    echo "ERROR: Staged files may contain secrets:"
+    echo "$MATCHES" | sed 's/^/  /'
+    echo ""
+    echo "Review these files before committing."
+    echo "If this is a false positive, commit with --no-verify."
+    exit 1
+fi

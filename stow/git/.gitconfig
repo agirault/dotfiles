@@ -1,0 +1,128 @@
+[alias]
+  graph = log --graph --decorate --color --pretty=format:'%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset'
+  lg = graph --first-parent
+  merges = lg --merges
+  amend = commit --amend --no-edit --signoff
+  amend-author = amend --author="$1"
+  unstage = restore --staged
+  # The alias `f` (and `fix`, `fixup`) streamlines the process of creating a `fixup!` commit
+  # and then immediately applying it with an interactive rebase.
+  #
+  # How it works:
+  # 1. It takes one argument: the commit hash (or any commit-ish) you want to fix up.
+  # 2. It creates a `fixup!` commit for you, using the currently staged changes.
+  # 3. It then immediately starts an `--autosquash` rebase.
+  #
+  # Conflict Handling:
+  # - If the rebase stops due to conflicts, the function will pause.
+  # - It will show you a `diff` of the conflicting files.
+  # - You can then fix the conflicts in your editor.
+  # - After you save and quit the diff pager, the alias automatically checks if conflicts are resolved.
+  # - If they are, it runs `git rebase --continue` for you.
+  # - If conflicts still exist, it aborts the rebase to prevent further issues.
+  fixup = "!f() { \
+    if [ $# -lt 1 ]; then echo 'Usage: git f <commit-ish>'; return 2; fi; \
+    REV=$(git rev-parse --verify \"$1\") || return 1; \
+    git commit --fixup=\"$REV\" || return 1; \
+    GIT_SEQUENCE_EDITOR=true git rebase --interactive --autosquash --autostash --rebase-merges --no-fork-point \"$REV^\"; \
+    RET=$?; \
+    while [ \"$RET\" -ne 0 ] && git rev-parse --verify --quiet REBASE_HEAD >/dev/null 2>&1; do \
+      echo 'Rebase paused due to conflicts. Resolve them now, then quit the pager to continue.'; \
+      git diff --diff-filter=U --color=always | less -R; \
+      if ! git status --short | grep -q ^UU; then \
+        echo 'No remaining conflicts detected. Continuing rebase...'; \
+        GIT_EDITOR=true git rebase --continue; \
+        RET=$?; \
+      else \
+        echo 'Conflicts still exist. Aborting rebase.'; \
+        git rebase --abort && \
+        git reset --soft HEAD^; \
+        break; \
+      fi; \
+    done; \
+    if [ \"$RET\" -ne 0 ]; then \
+      echo 'Rebase canceled. Something went wrong.'; \
+      return 1; \
+    fi; \
+  }; f"
+  fix = fixup
+  f = fixup
+  edit = "!REV=$(git rev-parse $1) && GIT_SEQUENCE_EDITOR=\"sed -i '0,/^pick/s//edit/'\" git rebase --interactive --autostash --rebase-merges --no-fork-point $REV^ #"
+  reword = "!REV=$(git rev-parse $1) && GIT_SEQUENCE_EDITOR=\"sed -i '0,/^pick/s//reword/'\" git rebase --interactive --autostash --rebase-merges --no-fork-point $REV^ #"
+  branch-delete-merged = !git branch --merged | grep -Ev \"(^\\*|^\\s+master|^\\s+main$)\" | xargs git branch --delete
+  rename = branch --move
+  head = rev-parse HEAD
+  sha = rev-parse --short=9
+  bblame = blame --ignore-all-space -C -C -C
+  s = status
+  a = add
+  aa = add --all
+  rb = rebase
+  rbi = rebase --interactive
+  rba = rebase --abort
+  rbc = rebase --continue
+  cp = cherry-pick
+  cpa = cherry-pick --abort
+  cpc = cherry-pick --continue
+  cps = cherry-pick --skip
+  cm = "!git commit --signoff --message \"$@\" && git status #"
+  p = push origin HEAD
+  pf = p --force
+  ch = checkout
+  chb = checkout -b
+  rs = reset
+  rsa = reset --hard
+  rss = reset --soft
+  cleanf = clean --force --directory --quiet
+  cleani = clean --force --interactive
+  d = difftool
+  checkout-mr = "!f() { ID=$1; REMOTE=${2:-origin}; git fetch $REMOTE pull/$ID/head:mr-$ID && git checkout mr-$ID; }; f"
+  sync = !r=${1:-origin} && b=$(git rev-parse --abbrev-ref HEAD) && git fetch $r $b && git rsa $r/$b
+  track = branch --set-upstream-to=${1:-origin}/$(git branch --show-current) $(git branch --show-current)
+  upstream = rev-parse --abbrev-ref $(git branch --show-current)@{upstream}
+  stash-search = "!f() { \n  count=$(git stash list | wc -l); \n  if [ \"$count\" -gt 0 ]; then \n    for i in $(seq 0 $(($count - 1))); do \n      git stash show $i | grep -i \"$1\" && echo \"Found in stash@{$i}\\n\"; \n    done; \n  else \n    echo \"No stashes found\"; \n  fi; \n}; f"
+  ad = add
+  gstash = stash push --keep-index --include-untracked
+  st = gstash
+  pop = stash pop
+[commit]
+  verbose = true
+[pull]
+  default = current
+  rebase = true
+  ff = only
+[push]
+  default = current
+  followTags = false
+  autoSetupRemote = true
+[branch]
+  autoSetupMerge = false
+[rebase]
+  autosquash = true
+  autoStash = true
+[core]
+  editor = vim
+  autocrlf = false
+  safecrlf = false
+  pager = delta
+[diff]
+  # external = difft # use as difftool instead
+  tool = difftastic
+  colorMoved = default
+[difftool]
+  prompt = false
+[difftool "difftastic"]
+  cmd = difft "$LOCAL" "$REMOTE"
+[pager]
+  difftool = true
+[init]
+  defaultBranch = main
+[interactive]
+  diffFilter = delta --color-only
+[delta]
+  navigate = true
+  dark = true
+[merge]
+  conflictstyle = diff3
+[include]
+  path = ~/.gitconfig.local
