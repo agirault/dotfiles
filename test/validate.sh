@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Validate dotfiles installation
+# Validate system setup
 set -euo pipefail
 
 PASS=0
@@ -17,12 +17,12 @@ check() {
     fi
 }
 
-phase="${1:-install}"
+phase="${1:-configs}"
 
-if [[ "$phase" == "install" ]]; then
-    echo "== Validating install =="
+if [[ "$phase" == "configs" ]]; then
+    echo "== Validating configs =="
 
-    # Symlinks exist and point to dotfiles repo
+    # Symlinks exist
     echo "-- Symlinks --"
     check ".gitconfig is a symlink" test -L "$HOME/.gitconfig"
     check ".tmux.conf is a symlink" test -L "$HOME/.tmux.conf"
@@ -64,8 +64,8 @@ if [[ "$phase" == "install" ]]; then
     check "env_loader.fish has no syntax errors" fish -n "$HOME/.config/fish/conf.d/env_loader.fish"
     check "00-env-loader.sh has no syntax errors" bash -n "$HOME/.bashrc.d/00-env-loader.sh"
 
-elif [[ "$phase" == "uninstall" ]]; then
-    echo "== Validating uninstall =="
+elif [[ "$phase" == "unlink" ]]; then
+    echo "== Validating unlink =="
 
     # Symlinks should be gone
     echo "-- Symlinks removed --"

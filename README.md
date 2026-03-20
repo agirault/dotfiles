@@ -1,29 +1,29 @@
-# dotfiles
+# Personal System Setup
 
-Personal configuration files for Linux dev machines, managed with [GNU Stow](https://www.gnu.org/software/stow/).
+Configuration files, shell tools, and a bootstrap installer for Linux dev machines. Managed with [GNU Stow](https://www.gnu.org/software/stow/).
 
 ## Quick start
 
 ```bash
 git clone https://github.com/agirault/dotfiles.git ~/dotfiles
 cd ~/dotfiles
-./install.sh
+./setup.sh
 ```
 
 ## Modular install
 
 ```bash
-./install.sh packages     # system packages, fish, docker, claude CLI
-./install.sh configs      # symlink configs via stow
-./install.sh identity     # git name/email/GPG key
-./install.sh uninstall    # remove symlinks and restore backups
+./setup.sh packages     # system packages, fish, docker, claude CLI
+./setup.sh configs      # symlink dotfiles and tools via stow
+./setup.sh identity     # git name/email/GPG key
+./setup.sh unlink       # remove symlinks and restore backups
 ```
 
 ### Flags
 
 ```bash
-./install.sh --no-docker all      # skip Docker setup
-./install.sh --no-identity all    # skip identity setup (non-interactive)
+./setup.sh --no-docker all      # skip Docker setup
+./setup.sh --no-identity all    # skip identity setup (non-interactive)
 ```
 
 ## Stow packages
@@ -68,7 +68,7 @@ Current contents:
 
 ## Identity
 
-Git identity (name, email, GPG signing key) is stored in `~/.gitconfig.local` (gitignored). Created interactively by `./install.sh identity`.
+Git identity (name, email, GPG signing key) is stored in `~/.gitconfig.local` (gitignored). Created interactively by `./setup.sh identity`.
 
 ## Testing
 
@@ -77,7 +77,7 @@ Git identity (name, email, GPG signing key) is stored in `~/.gitconfig.local` (g
 ./run_tests.sh --no-docker  # run tests directly on this machine
 ```
 
-Tests validate install (symlinks, backups, content) and uninstall (restore originals).
+Tests validate configs (symlinks, backups, content) and unlink (restore originals).
 
 ## Security
 
@@ -90,10 +90,12 @@ Tests validate install (symlinks, backups, content) and uninstall (restore origi
 - **Claude skills**: `~/.claude/skills/` contains custom skills (e.g., weekly-report, unrewind) that would be useful across machines. Not yet stowed - needs review for internal/work-specific content before including in a public repo.
 - **Claude rules**: `~/.claude/rules/` (personal, use-case-specific rules) could also be stowed once reviewed.
 - **Docker test fixes**: Make `run_tests.sh` pass end-to-end in containers (see known issues below).
+- **setup.sh redundancy**: The configs and unlink phases share nearly identical stow iteration logic. Refactor to reduce duplication.
+- **Move custom .bashrc lines to .bashrc.d**: Inspect `~/.bashrc` for custom lines and move them to stowed snippets so `.bashrc` stays vanilla Ubuntu.
 - **Alternative tooling**: Investigate replacements or complements to GNU Stow and manual package scripts:
   - [lnko](https://github.com/luanvil/lnko) - Stow-like but with interactive conflict resolution, orphan cleanup, and status command
   - [pdrx](https://github.com/stefan-hacks/pdrx) - Auto-tracks which package manager installed what, enables declarative `pdrx apply` on new machines (could replace manual `packages.sh`)
-  - [dotter](https://github.com/SuperCuber/dotter) - Rust-based dotfile manager with templating and per-machine variable substitution (could replace `[include]` + `install.sh identity` pattern)
+  - [dotter](https://github.com/SuperCuber/dotter) - Rust-based dotfile manager with templating and per-machine variable substitution (could replace `[include]` + `setup.sh identity` pattern)
 
 ## Known issues
 

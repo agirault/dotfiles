@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Dotfiles installer
+# System setup: packages, dotfiles, tools, and identity
 # Usage:
-#   ./install.sh              # run all phases
-#   ./install.sh packages     # install system packages only
-#   ./install.sh configs      # stow configs only
-#   ./install.sh identity     # set up git identity + GPG only
-#   ./install.sh uninstall    # remove symlinks and restore backups
+#   ./setup.sh              # run all phases
+#   ./setup.sh packages     # install system packages only
+#   ./setup.sh configs      # symlink dotfiles and tools via stow
+#   ./setup.sh identity     # set up git identity + GPG only
+#   ./setup.sh unlink       # remove symlinks and restore backups
 #
 # Flags:
 #   --no-docker     skip Docker setup (e.g., when running inside a container)
@@ -62,11 +62,11 @@ phase_configs() {
     done
     if [[ ${#missing[@]} -gt 0 ]]; then
         echo "ERROR: Missing required commands: ${missing[*]}"
-        echo "Run './install.sh packages' first."
+        echo "Run './setup.sh packages' first."
         exit 1
     fi
 
-    echo "==> Stowing configs..."
+    echo "==> Setting up configs..."
 
     cd "$DOTFILES_DIR"
 
@@ -109,7 +109,7 @@ BASH
         echo "    Removed stale ~/AGENTS.md (now at ~/.claude/CLAUDE.md)"
     fi
 
-    echo "==> Configs stowed."
+    echo "==> Configs set up."
 }
 
 # ---- Phase: identity ----
@@ -117,9 +117,9 @@ phase_identity() {
     bash "$SETUP_DIR/identity.sh"
 }
 
-# ---- Phase: uninstall ----
-phase_uninstall() {
-    echo "==> Unstowing configs..."
+# ---- Phase: unlink ----
+phase_unlink() {
+    echo "==> Unlinking dotfiles and tools..."
 
     cd "$DOTFILES_DIR"
 
@@ -140,7 +140,7 @@ phase_uninstall() {
         done < <(cd "$DOTFILES_DIR/stow/$pkg" && find . -type f | sed 's|^\./||')
     done
 
-    echo "==> Configs restored."
+    echo "==> Unlinked."
 }
 
 # ---- Main ----
@@ -166,11 +166,11 @@ case "$phase" in
             phase_identity
         fi
         ;;
-    uninstall)
-        phase_uninstall
+    unlink)
+        phase_unlink
         ;;
     *)
-        echo "Usage: $0 [packages|configs|identity|uninstall]"
+        echo "Usage: $0 [packages|configs|identity|unlink]"
         exit 1
         ;;
 esac
