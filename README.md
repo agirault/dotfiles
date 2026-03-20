@@ -28,15 +28,23 @@ cd ~/dotfiles
 
 ## Stow packages
 
-| Package | Contents |
-|---------|----------|
-| `git` | Aliases, delta pager, difftastic, rebase settings. Identity via `[include]` from `~/.gitconfig.local` |
-| `fish` | Shell config, shared env loader |
-| `tools` | Standalone commands in `~/.local/bin/`: `cw` tmux workspace manager (run `cw --help`) |
-| `tmux` | Ctrl-a prefix, mouse, splits (`\`/`-`), OSC52 clipboard, bell notifications, setup docs |
-| `claude` | Claude Code settings, Catppuccin status line, global agent instructions (CLAUDE.md) |
-| `bash` | `.bashrc.d/` snippets: shared env loader, login script sourcer |
-| `env` | Shared environment under `~/.config/env/`: env files and login script |
+| Package | Target | Contents |
+|---------|--------|----------|
+| `dotfiles` | `~/` | Git, fish, tmux, bash, claude configs, shared env and login script |
+| `tools` | `~/.local/bin/` | Standalone commands (`cw` tmux workspace manager) |
+
+### What's in `dotfiles`
+
+- **Git**: aliases, delta pager, difftastic, rebase settings. Identity via `[include]` from `~/.gitconfig.local`
+- **Fish**: shell config, shared env loader
+- **Tmux**: Ctrl-a prefix, mouse, splits, OSC52 clipboard, bell notifications
+- **Claude**: Claude Code settings, Catppuccin status line, global agent instructions (CLAUDE.md)
+- **Bash**: `.bashrc.d/` snippets for env loading and login script sourcing
+- **Shared env** (`~/.config/env/`): `env.conf` and `login.sh` used by both bash and fish (see below)
+
+### What's in `tools`
+
+- **`cw`**: tmux workspace manager. Run `cw --help` for usage.
 
 ## Shared environment
 
