@@ -73,6 +73,10 @@ Tests validate install (symlinks, backups, content) and uninstall (restore origi
 - **Claude skills**: `~/.claude/skills/` contains custom skills (e.g., weekly-report, unrewind) that would be useful across machines. Not yet stowed - needs review for internal/work-specific content before including in a public repo.
 - **Claude rules**: `~/.claude/rules/` (personal, use-case-specific rules) could also be stowed once reviewed.
 - **Docker test fixes**: Make `run_tests.sh` pass end-to-end in containers (see known issues below).
+- **Alternative tooling**: Investigate replacements or complements to GNU Stow and manual package scripts:
+  - [lnko](https://github.com/luanvil/lnko) - Stow-like but with interactive conflict resolution, orphan cleanup, and status command
+  - [pdrx](https://github.com/stefan-hacks/pdrx) - Auto-tracks which package manager installed what, enables declarative `pdrx apply` on new machines (could replace manual `packages.sh`)
+  - [dotter](https://github.com/SuperCuber/dotter) - Rust-based dotfile manager with templating and per-machine variable substitution (could replace `[include]` + `install.sh identity` pattern)
 
 ## Known issues
 
