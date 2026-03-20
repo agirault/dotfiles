@@ -31,7 +31,8 @@ cd ~/dotfiles
 | Package | Contents |
 |---------|----------|
 | `git` | Aliases, delta pager, difftastic, rebase settings. Identity via `[include]` from `~/.gitconfig.local` |
-| `fish` | Shell config, SSH agent forwarding fix for tmux, `cw` workspace function, shared env loader |
+| `fish` | Shell config, SSH agent forwarding fix for tmux, shared env loader |
+| `tools` | Standalone commands in `~/.local/bin/`: `cw` tmux workspace manager (run `cw --help`) |
 | `tmux` | Ctrl-a prefix, mouse, splits (`\`/`-`), OSC52 clipboard, bell notifications, setup docs |
 | `claude` | Claude Code settings, Catppuccin status line, global agent instructions (CLAUDE.md) |
 | `bash` | `.bashrc.d/` snippets: shared env loader, fastfetch |

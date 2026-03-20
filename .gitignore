@@ -1,7 +1,6 @@
 # Identity and secrets
-*.local
-*.local.*
 .gitconfig.local
+*.local.*
 
 # Keys and credentials
 *.gpg

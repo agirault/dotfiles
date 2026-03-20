@@ -70,14 +70,10 @@ phase_configs() {
 
     cd "$DOTFILES_DIR"
 
-    stow_packages=(git fish tmux claude bash env)
+    # Discover stow packages dynamically from stow/ subdirectories
+    mapfile -t stow_packages < <(find "$DOTFILES_DIR/stow" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort)
 
     for pkg in "${stow_packages[@]}"; do
-        if [[ ! -d "$DOTFILES_DIR/stow/$pkg" ]]; then
-            echo "    Skipping $pkg (directory not found)"
-            continue
-        fi
-
         # Back up existing files that would conflict with stow
         # Skip symlinks (already stowed) and files inside the repo (tree folding)
         while IFS= read -r target; do
@@ -127,13 +123,10 @@ phase_uninstall() {
 
     cd "$DOTFILES_DIR"
 
-    stow_packages=(git fish tmux claude bash env)
+    # Discover stow packages dynamically from stow/ subdirectories
+    mapfile -t stow_packages < <(find "$DOTFILES_DIR/stow" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort)
 
     for pkg in "${stow_packages[@]}"; do
-        if [[ ! -d "$DOTFILES_DIR/stow/$pkg" ]]; then
-            continue
-        fi
-
         stow -d "$DOTFILES_DIR/stow" -t "$HOME" -D "$pkg" 2>/dev/null || true
         echo "    Unstowed $pkg"
 

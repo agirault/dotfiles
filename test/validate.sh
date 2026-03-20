@@ -27,7 +27,6 @@ if [[ "$phase" == "install" ]]; then
     check ".gitconfig is a symlink" test -L "$HOME/.gitconfig"
     check ".tmux.conf is a symlink" test -L "$HOME/.tmux.conf"
     check ".config/fish/config.fish is a symlink" test -L "$HOME/.config/fish/config.fish"
-    check ".config/fish/functions/cw.fish is a symlink" test -L "$HOME/.config/fish/functions/cw.fish"
     check ".config/fish/conf.d/env_loader.fish is a symlink" test -L "$HOME/.config/fish/conf.d/env_loader.fish"
     check ".claude/settings.json is a symlink" test -L "$HOME/.claude/settings.json"
     check ".claude/CLAUDE.md is a symlink" test -L "$HOME/.claude/CLAUDE.md"
@@ -37,6 +36,7 @@ if [[ "$phase" == "install" ]]; then
     check ".config/env/path.env is a symlink" test -L "$HOME/.config/env/path.env"
     check ".config/env/aliases.env is a symlink" test -L "$HOME/.config/env/aliases.env"
     check ".config/env/exports.env is a symlink" test -L "$HOME/.config/env/exports.env"
+    check ".local/bin/cw is a symlink" test -L "$HOME/.local/bin/cw"
 
     # Backups created for pre-existing files
     echo "-- Backups --"
@@ -51,6 +51,7 @@ if [[ "$phase" == "install" ]]; then
     check ".gitconfig has NO [user] section" ! grep -q '^\[user\]' "$HOME/.gitconfig"
     check ".claude/settings.json uses ~ not /home/" ! grep -q '/home/' "$HOME/.claude/settings.json"
     check ".bashrc sources .bashrc.d" grep -q 'bashrc.d' "$HOME/.bashrc"
+    check "cw is executable" test -x "$HOME/.local/bin/cw"
 
     # Commands available
     echo "-- Commands --"

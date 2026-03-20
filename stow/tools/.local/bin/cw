@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# cw - Create or attach to a tmux workspace
+#
+# Usage:
+#   cw              show picker: list existing workspaces + create new
+#   cw <name>       create or switch to workspace named <name>
+#   cw --help       show this help
+#
+# Each workspace is a tmux window with two side-by-side panes, all under a
+# single "work" session. When attaching from outside tmux, a grouped session
+# is created so each terminal gets an independent view - different workspaces
+# on different monitors.
+#
+# The picker uses fzf. New workspace names default to the current directory.
+# Duplicate names are rejected with a re-prompt.
+#
+# Quick reference (inside tmux):
+#   Ctrl-a n / p / <number>   switch windows
+#   Ctrl-a ,                  rename window
+#   Ctrl-a &                  kill window
+#   Ctrl-a d                  detach (keep alive)
+#   Ctrl-a \                  split vertical
+#   Ctrl-a -                  split horizontal
+#   Alt+arrow                 move between panes
+#
+# Dependencies: tmux, fzf
+
+set -euo pipefail
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    sed -n '2,/^[^#]/{ /^#/s/^# \?//p }' "$0"
+    exit 0
+fi
+
+SESSION="work"
+WIN_NAME="${1:-}"
+
+# --- Helpers ---
+
+create_window() {
+    local sess=$1 name=$2 dir=$3
+    tmux new-window -t "$sess" -n "$name" -c "$dir"
+    tmux split-window -h -t "$sess:$name" -c "$dir"
+    tmux select-pane -t "$sess:$name.0"
+}
+
+attach() {
+    local sess=$1 win=${2:-}
+    # Create a grouped session so each terminal gets its own independent view
+    # destroy-unattached cleans up the view on detach, SSH drop, or terminal close
+    local view="view-$RANDOM"
+    if [ -n "$win" ]; then
+        tmux new-session -t "$sess" -s "$view" \; \
+            set-option destroy-unattached on \; \
+            select-window -t "$win"
+    else
+        tmux new-session -t "$sess" -s "$view" \; \
+            set-option destroy-unattached on
+    fi
+}
+
+ensure_session() {
+    local sess=$1 name=$2 dir=$3
+    if ! tmux has-session -t "$sess" 2>/dev/null; then
+        tmux new-session -d -s "$sess" -n "$name" -c "$dir"
+        tmux split-window -h -t "$sess:$name" -c "$dir"
+        tmux select-pane -t "$sess:$name.0"
+        return 0
+    fi
+    return 1
+}
+
+# --- If a name was given: create or switch to that window ---
+
+if [ -n "$WIN_NAME" ]; then
+    if ! ensure_session "$SESSION" "$WIN_NAME" "$(pwd)"; then
+        # Session exists - create window if needed
+        if ! tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$WIN_NAME"; then
+            create_window "$SESSION" "$WIN_NAME" "$(pwd)"
+        fi
+    fi
+
+    if [ -z "${TMUX:-}" ]; then
+        attach "$SESSION" "$WIN_NAME"
+    else
+        tmux select-window -t "$SESSION:$WIN_NAME"
+    fi
+    exit 0
+fi
+
+# --- No name given: show picker ---
+
+options=""
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+    options=$(tmux list-windows -t "$SESSION" -F '#{window_name}')
+fi
+
+new_label="+ new workspace"
+pick=$(printf '%s\n%s\n' "$options" "$new_label" | sed '/^$/d' | fzf --height=~15 --reverse --prompt="workspace: ") || exit 1
+
+if [ "$pick" = "$new_label" ]; then
+    default_name=$(basename "$(pwd)")
+    printf "Workspace ID (defaults to: %s): " "$default_name"
+    read -r pick || exit 1
+    [ -z "$pick" ] && pick="$default_name"
+
+    # Ensure unique name - loop until valid
+    while tmux has-session -t "$SESSION" 2>/dev/null; do
+        existing=$(tmux list-windows -t "$SESSION" -F '#{window_name}')
+        if ! echo "$existing" | grep -qx "$pick"; then
+            break
+        fi
+        echo "'$pick' already exists. Pick another name."
+        printf "Workspace ID (defaults to: %s): " "$default_name"
+        read -r pick || exit 1
+        [ -z "$pick" ] && pick="$default_name"
+    done
+
+    if ! ensure_session "$SESSION" "$pick" "$(pwd)"; then
+        create_window "$SESSION" "$pick" "$(pwd)"
+    fi
+fi
+
+if [ -z "${TMUX:-}" ]; then
+    attach "$SESSION" "$pick"
+else
+    tmux select-window -t "$SESSION:$pick"
+fi
