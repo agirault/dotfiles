@@ -20,6 +20,7 @@ fi
 
 DOTFILES_DIR="$(cd "$(dirname "$0")" && pwd)"
 SETUP_DIR="$DOTFILES_DIR/setup"
+STOW_DIR="$DOTFILES_DIR/stow"
 NO_DOCKER=false
 NO_IDENTITY=false
 
@@ -33,6 +34,18 @@ for arg in "$@"; do
     esac
 done
 set -- "${args[@]+"${args[@]}"}"
+
+# ---- Helpers ----
+
+# List all stow package names
+stow_packages() {
+    find "$STOW_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort
+}
+
+# List target file paths for a stow package (relative to ~)
+stow_targets() {
+    (cd "$STOW_DIR/$1" && find . -type f | sed 's|^\./||')
+}
 
 # ---- Phase: packages ----
 phase_packages() {
@@ -68,26 +81,23 @@ phase_configs() {
 
     echo "==> Setting up configs..."
 
-    cd "$DOTFILES_DIR"
-
-    # Discover stow packages dynamically from stow/ subdirectories
-    mapfile -t stow_packages < <(find "$DOTFILES_DIR/stow" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort)
-
-    for pkg in "${stow_packages[@]}"; do
+    for pkg in $(stow_packages); do
         # Back up existing files that would conflict with stow
-        # Skip symlinks (already stowed) and files inside the repo (tree folding)
-        while IFS= read -r target; do
-            target="$HOME/$target"
-            if [[ -e "$target" && ! -L "$target" ]]; then
-                real_path=$(readlink -f "$target")
+        for target in $(stow_targets "$pkg"); do
+            local full="$HOME/$target"
+            # Skip symlinks (already stowed)
+            if [[ -e "$full" && ! -L "$full" ]]; then
+                real_path=$(readlink -f "$full")
+                # Skip files inside the repo (tree folding)
                 if [[ "$real_path" != "$DOTFILES_DIR"/* ]]; then
-                    echo "    Backing up $target -> ${target}.bak"
-                    mv "$target" "${target}.bak"
+                    echo "    Backing up $full -> ${full}.bak"
+                    mv "$full" "${full}.bak"
                 fi
             fi
-        done < <(cd "$DOTFILES_DIR/stow/$pkg" && find . -type f | sed 's|^\./||')
+        done
 
-        stow -d "$DOTFILES_DIR/stow" -t "$HOME" --restow "$pkg"
+        # Stow the package
+        stow -d "$STOW_DIR" -t "$HOME" --restow "$pkg"
         echo "    Stowed $pkg"
     done
 
@@ -121,23 +131,19 @@ phase_identity() {
 phase_unlink() {
     echo "==> Unlinking dotfiles and tools..."
 
-    cd "$DOTFILES_DIR"
-
-    # Discover stow packages dynamically from stow/ subdirectories
-    mapfile -t stow_packages < <(find "$DOTFILES_DIR/stow" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort)
-
-    for pkg in "${stow_packages[@]}"; do
-        stow -d "$DOTFILES_DIR/stow" -t "$HOME" -D "$pkg" 2>/dev/null || true
+    for pkg in $(stow_packages); do
+        # Unstow the package
+        stow -d "$STOW_DIR" -t "$HOME" -D "$pkg" 2>/dev/null || true
         echo "    Unstowed $pkg"
 
         # Restore .bak files from first-time install
-        while IFS= read -r target; do
-            target="$HOME/$target"
-            if [[ -f "${target}.bak" ]]; then
-                mv "${target}.bak" "$target"
-                echo "    Restored $target"
+        for target in $(stow_targets "$pkg"); do
+            local full="$HOME/$target"
+            if [[ -f "${full}.bak" ]]; then
+                mv "${full}.bak" "$full"
+                echo "    Restored $full"
             fi
-        done < <(cd "$DOTFILES_DIR/stow/$pkg" && find . -type f | sed 's|^\./||')
+        done
     done
 
     echo "==> Unlinked."
