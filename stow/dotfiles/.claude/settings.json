@@ -10,5 +10,19 @@
     "command": "~/.claude/executable_statusline.sh"
   },
   "effortLevel": "medium",
-  "autoMemoryDirectory": "~/.claude/memory"
+  "autoMemoryDirectory": "~/.claude/memory",
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/auto-cleanup-session.py",
+            "timeout": 5,
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
 }
