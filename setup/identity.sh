@@ -72,4 +72,13 @@ if [[ -n "$gpg_id" ]]; then
     fi
 fi
 
+# GitLab CLI setup
+if command -v glab >/dev/null 2>&1; then
+    read -p "[glab] Default GitLab hostname (leave empty to skip): " gitlab_host
+    if [[ -n "$gitlab_host" ]]; then
+        glab config set host "$gitlab_host"
+        echo "    glab: default host set to $gitlab_host."
+    fi
+fi
+
 echo "==> Identity configured."

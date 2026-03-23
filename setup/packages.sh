@@ -52,10 +52,15 @@ sudo apt-get install -y \
     build-essential libtool m4 automake \
     ca-certificates gnupg gnupg2 pass pinentry-tty
 
-# snap packages
-command -v glab >/dev/null 2>&1 || sudo snap install glab
-
-# Script-installed tools
+# Binary-installed tools
+# Note: glab from snap has permission issues, from apt is too old
+command -v glab >/dev/null 2>&1 || {
+    glab_version=$(curl -s https://gitlab.com/gitlab-org/cli/-/releases/permalink/latest | grep -oP 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    curl -sL "https://gitlab.com/gitlab-org/cli/-/releases/${glab_version}/downloads/glab_${glab_version#v}_linux_amd64.tar.gz" | \
+        tar -xz -C /tmp bin/glab
+    install /tmp/bin/glab "$HOME/.local/bin/glab"
+    rm -rf /tmp/bin
+}
 command -v dust >/dev/null 2>&1 || \
     (curl -sSfL https://raw.githubusercontent.com/bootandy/dust/refs/heads/master/install.sh | bash)
 command -v curlie >/dev/null 2>&1 || \

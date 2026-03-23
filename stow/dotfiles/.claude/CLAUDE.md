@@ -4,7 +4,13 @@
 
 - never use \u2014, only `-`
 
-# Agentic workflow
+## Git
+
+- Use my `git cm` alias for committing with a message and signing off.
+- Use `gh` for GitHub remote operations.
+- Use `glab` for GitLab remote operations.
+
+## Agentic workflow
 
 ### Memory/Rules
 
@@ -25,4 +31,3 @@ When creating skills:
 ### Learnings
 
 Whenever I correct you, suggest afterwards whether I want that learning to be captured by you so you don't make the same future mistake. Use the choice selector tool with your recommended locations to save this as the first option, from the list above. Don't save is also a valid option which could be the recommended one.
-
