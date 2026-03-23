@@ -1,0 +1,896 @@
+#!/usr/bin/env python3
+"""claude-sessions - Cross-directory Claude Code session browser.
+
+Curses TUI displaying sessions in a collapsible tree grouped by directory,
+with a live preview pane showing conversation history.
+
+Tree navigation:
+  j/k or up/down     Move selection
+  h/l or left/right  Collapse/expand directory (right on session: focus preview)
+  Enter               Resume session or toggle fold
+  / or s              Focus search bar (also: up arrow from first item)
+  c                   Collapse/expand all directories
+  b                   Toggle branch column
+  d                   Delete session (press d again to confirm)
+  r                   Rename session
+  PgUp/PgDn           Page through tree
+  Esc or Ctrl+C       Exit search / quit
+  q                   Quit
+
+Preview navigation (right arrow from a session to enter):
+  j/k or up/down     Scroll line by line
+  Ctrl-d/Ctrl-u      Scroll half page
+  PgUp/PgDn          Scroll full page
+  h/l or left/Esc    Return to tree
+
+Mouse: click to select, scroll wheel on tree or preview.
+"""
+
+import curses
+import os
+import sys
+import textwrap
+
+# -- Path setup and imports from claude_utils --
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+sys.path.insert(0, SCRIPT_DIR)
+from claude_utils import text as cu_text  # noqa: E402
+from claude_utils import sessions as cu_sessions  # noqa: E402
+from claude_utils.index import index_all_sessions  # noqa: E402
+sys.path.pop(0)
+
+# -- Layout constants --
+
+TITLE = "Resume Claude Code Session"
+HEADER_ROWS = 6       # title(1) + search box(3) + column headers(1) + separator(1)
+COL_TITLE = 30
+COL_TIME = 8
+COL_MSGS = 6
+COL_BRANCH = 18
+COL_GAP = 2           # gap between columns
+TREE_INDENT = 6       # 1-space margin + "  ├─ "
+MIN_PREVIEW_W = 15
+MAX_PREVIEW_MESSAGES = 20
+
+# Unicode glyphs
+CONNECTOR_MID = "\u251c\u2500"   # ├─
+CONNECTOR_END = "\u2514\u2500"   # └─
+MARKER_OPEN = "\u25be"           # ▾
+MARKER_CLOSED = "\u25b8"         # ▸
+SEARCH_ICON = "\u2315"           # ⌕
+CURSOR_BLOCK = "\u2588"          # █
+ARROW_UP = "\u25b2"              # ▲
+ARROW_DOWN = "\u25bc"            # ▼
+ICON_USER = "\U0001f464"         # 👤
+ICON_ASSISTANT = "\U0001f916"    # 🤖
+BOX_TL = "\u256d"                # ╭
+BOX_TR = "\u256e"                # ╮
+BOX_BL = "\u2570"                # ╰
+BOX_BR = "\u256f"                # ╯
+BOX_H = "\u2500"                 # ─
+BOX_V = "\u2502"                 # │
+BOX_T_DOWN = "\u252c"            # ┬
+BOX_CORNER_BL = "\u2514"         # └
+BOX_CORNER_BR = "\u2518"         # ┘
+BOX_CORNER_TR = "\u2510"         # ┐
+
+# Color pair indices
+CP_CYAN = 1
+CP_YELLOW = 2
+CP_RED = 3
+CP_INACTIVE_SEL = 4
+
+# Key codes
+KEY_CTRL_C = 3
+KEY_CTRL_D = 4
+KEY_CTRL_U = 21
+KEY_ENTER_CODES = (10, 13, curses.KEY_ENTER)
+KEY_BACKSPACE_CODES = (curses.KEY_BACKSPACE, 127, 8)
+KEY_UP_CODES = (curses.KEY_UP, ord("k"))
+KEY_DOWN_CODES = (curses.KEY_DOWN, ord("j"))
+KEY_LEFT_CODES = (curses.KEY_LEFT, ord("h"))
+KEY_RIGHT_CODES = (curses.KEY_RIGHT, ord("l"))
+KEY_ESC_OR_QUIT = (27, KEY_CTRL_C)
+
+
+def tree_columns_width(show_branch=False):
+    """Total width of tree columns including indent and gaps."""
+    w = TREE_INDENT + COL_TITLE + COL_GAP + COL_TIME + COL_GAP + COL_MSGS + COL_GAP
+    if show_branch:
+        w += COL_BRANCH + COL_GAP
+    return w
+
+
+def _osc52_copy(text):
+    """Copy text to system clipboard via OSC 52 escape sequence (works over SSH)."""
+    import base64
+    encoded = base64.b64encode(text.encode()).decode()
+    sys.stdout.write(f"\033]52;c;{encoded}\a")
+    sys.stdout.flush()
+
+
+def _flash(stdscr, y, x, text, w, duration_ms=120):
+    """Briefly flash text in reverse video to indicate an action."""
+    _safe_addstr(stdscr, y, x, text[:w], w, curses.A_REVERSE | curses.color_pair(CP_CYAN))
+    stdscr.refresh()
+    curses.napms(duration_ms)
+
+
+def _safe_addstr(stdscr, y, x, text, max_w, attr=0):
+    """Write text to screen, silently ignoring curses errors."""
+    if max_w <= 0:
+        return
+    try:
+        stdscr.addnstr(y, x, text, max_w, attr)
+    except curses.error:
+        pass
+
+
+# -- Data loading and grouping --
+
+
+def load_sessions():
+    """Load session metadata from all Claude project directories."""
+    return [s.to_dict() for s in index_all_sessions()]
+
+
+def build_groups(sessions):
+    """Group active sessions by directory, sorted by most recent activity."""
+    groups = {}
+    order = []
+    for s in sessions:
+        if s["message_count"] <= 0:
+            continue
+        d = s["dir"]
+        if d not in groups:
+            groups[d] = []
+            order.append(d)
+        groups[d].append(s)
+
+    order.sort(key=lambda d: groups[d][0]["last_active"], reverse=True)
+    return [(d, groups[d]) for d in order]
+
+
+def build_visible(groups, collapsed, filter_query):
+    """Build the flat list of visible lines from groups.
+
+    Returns (lines, total_matching) where total_matching counts all sessions
+    that match the filter regardless of collapse state.
+    """
+    q = filter_query.lower() if filter_query else ""
+    lines = []
+    total_matching = 0
+
+    for dir_path, dir_sessions in groups:
+        if q:
+            matched = [
+                s for s in dir_sessions
+                if q in s["title"].lower()
+                or q in s["dir"].lower()
+                or q in s["git_branch"].lower()
+            ]
+            if not matched and q not in dir_path.lower():
+                continue
+            if not matched:
+                matched = dir_sessions  # dir name matched, show all its sessions
+        else:
+            matched = dir_sessions
+
+        total_matching += len(matched)
+        lines.append({"type": "header", "dir": dir_path, "count": len(matched)})
+
+        # When filtering, always expand to show matches
+        if dir_path not in collapsed or q:
+            for i, s in enumerate(matched):
+                is_last = i == len(matched) - 1
+                lines.append({
+                    "type": "session",
+                    "session": s,
+                    "connector": CONNECTOR_END if is_last else CONNECTOR_MID,
+                    "dir": dir_path,
+                })
+
+    return lines, total_matching
+
+
+
+def build_preview_data(session, content_w):
+    """Build preview content: pinned metadata + scrollable messages + click regions.
+
+    Returns (meta_lines, msg_lines, click_regions) where:
+      - meta_lines, msg_lines: list of (text, attr_name) tuples
+      - click_regions: list of {"row": int, "x_start": int, "x_end": int, "value": str}
+        row is 0-based relative to metadata start
+    """
+    if not session or content_w < 10:
+        return [], [], []
+
+    s = session
+    LABEL_W = 8  # "Name    " etc
+
+    name_display = s["title"] if s["named"] else "(none)"
+    left_items = [("Name", name_display), ("Dir", s["dir"]), ("Branch", s["git_branch"] or "(none)")]
+    right_items = [
+        ("Last", s["relative_time"]),
+        ("Msgs", str(s["message_count"])),
+        ("Size", s["size"]),
+    ]
+
+    meta = []
+    click_regions = []
+
+    max_left = max(len(f"{l:7s} {v}") for l, v in left_items)
+    max_right = max(len(f"{l:5s} {v}") for l, v in right_items)
+    side_by_side = max_left + max_right + 2 <= content_w
+
+    if side_by_side:
+        for i in range(max(len(left_items), len(right_items))):
+            row = len(meta)
+            left = f"{left_items[i][0]:7s} {left_items[i][1]}" if i < len(left_items) else ""
+            if i < len(right_items):
+                right = f"{right_items[i][0]:5s} {right_items[i][1]}"
+                line = f"{left:{content_w - len(right)}s}{right}"
+                meta.append((line, "dim"))
+            else:
+                meta.append((left, "dim"))
+            if i < len(left_items):
+                val = left_items[i][1]
+                click_regions.append({"row": row, "x_start": LABEL_W, "x_end": LABEL_W + len(val), "value": val})
+            if i < len(right_items):
+                val = right_items[i][1]
+                rx = meta[-1][0].rfind(val)
+                if rx >= 0:
+                    click_regions.append({"row": row, "x_start": rx, "x_end": rx + len(val), "value": val})
+    else:
+        for label, value in left_items + right_items:
+            row = len(meta)
+            meta.append((f"{label:7s} {value}", "dim"))
+            click_regions.append({"row": row, "x_start": LABEL_W, "x_end": LABEL_W + len(value), "value": value})
+
+    row = len(meta)
+    meta.append((f"{'ID':7s} {s['session_id']}", "dim"))
+    click_regions.append({"row": row, "x_start": LABEL_W, "x_end": LABEL_W + len(s["session_id"]), "value": s["session_id"]})
+
+    # Chat messages
+    msgs = []
+    wrap_w = content_w - 4
+    for msg in cu_sessions.load_messages(s["jsonl_path"], MAX_PREVIEW_MESSAGES):
+        if msg["role"] == "user":
+            label = f"{ICON_USER} You"
+            indent = max(0, content_w - len(label) - 1)
+            msgs.append((f"{' ' * indent}{label}", "bold"))
+            for wline in textwrap.wrap(msg["text"], width=wrap_w):
+                pad = max(0, content_w - len(wline) - 2)
+                msgs.append((f"{' ' * pad}  {wline}", "normal"))
+        else:
+            msgs.append((f"{ICON_ASSISTANT} Claude", "bold"))
+            for wline in textwrap.wrap(msg["text"], width=wrap_w):
+                msgs.append((f"  {wline}", "dim"))
+        msgs.append(("", "dim"))
+
+    return meta, msgs, click_regions
+
+
+# -- Rendering --
+
+ATTR_MAP = {"dim": curses.A_DIM, "bold": curses.A_BOLD, "normal": 0}
+
+
+def render_header_bar(stdscr, width, filter_query, filtering, total,
+                      tree_w=None, show_branch=False):
+    """Render title (row 0), search box (rows 1-3), column headers (row 4),
+    and separator (row 5)."""
+    _safe_addstr(stdscr, 0, 0, TITLE, width - 1, curses.A_BOLD)
+
+    # Search box
+    box_w = min(width - 1, max(width - 1, tree_columns_width(show_branch) + 6))
+    inner_w = box_w - 2
+    box_attr = curses.color_pair(CP_CYAN) if filtering else curses.A_DIM
+
+    if filtering or filter_query:
+        content = f" {SEARCH_ICON} {filter_query}"
+        if filtering:
+            content += CURSOR_BLOCK
+        content_attr = curses.A_BOLD | curses.color_pair(CP_CYAN) if filtering else curses.A_DIM
+    else:
+        content = f" {SEARCH_ICON} Search..."
+        content_attr = curses.A_DIM
+
+    count_str = f"{total} sessions "
+    content_w = inner_w - len(count_str)
+
+    _safe_addstr(stdscr, 1, 0, BOX_TL + BOX_H * (box_w - 2) + BOX_TR, width - 1, box_attr)
+    _safe_addstr(stdscr, 2, 0, BOX_V, 1, box_attr)
+    _safe_addstr(stdscr, 2, 1, f"{content:{content_w}s}", content_w, content_attr)
+    _safe_addstr(stdscr, 2, 1 + content_w, count_str, len(count_str), curses.A_DIM)
+    _safe_addstr(stdscr, 2, box_w - 1, BOX_V, 1, box_attr)
+    _safe_addstr(stdscr, 3, 0, BOX_BL + BOX_H * (box_w - 2) + BOX_BR, width - 1, box_attr)
+
+    # Column headers (row 4)
+    hdr = curses.A_DIM
+    x = 1
+    session_col_w = TREE_INDENT + COL_TITLE - 1
+    _safe_addstr(stdscr, 4, x, f"{'Session':{session_col_w}s}", min(session_col_w, width - x - 1), hdr)
+    x = 1 + session_col_w
+    _safe_addstr(stdscr, 4, x, f"  {'Time':>{COL_TIME}s}", min(COL_TIME + COL_GAP, width - x - 1), hdr)
+    x += COL_TIME + COL_GAP
+    _safe_addstr(stdscr, 4, x, f"  {'Msgs':>{COL_MSGS}s}", min(COL_MSGS + COL_GAP, width - x - 1), hdr)
+    x += COL_MSGS + COL_GAP
+    if show_branch:
+        _safe_addstr(stdscr, 4, x, f"  {'Branch':{COL_BRANCH}s}", min(COL_BRANCH + COL_GAP, width - x - 1), hdr)
+    if tree_w and tree_w < width:
+        _safe_addstr(stdscr, 4, tree_w + 2, "Metadata / Preview", min(18, width - tree_w - 3), hdr)
+
+    # Separator (row 5)
+    _safe_addstr(stdscr, 5, 1, BOX_H * (width - 2), width - 2, curses.A_DIM)
+
+
+def _addstr_highlighted(stdscr, y, x, text, max_w, base_attr, query):
+    """Render text, highlighting the first substring match in yellow+underline."""
+    if max_w <= 0:
+        return 0
+    if not query:
+        _safe_addstr(stdscr, y, x, text, max_w, base_attr)
+        return min(len(text), max_w)
+
+    pos = text.lower().find(query.lower())
+    if pos < 0:
+        _safe_addstr(stdscr, y, x, text, max_w, base_attr)
+        return min(len(text), max_w)
+
+    hl_attr = curses.color_pair(CP_YELLOW) | curses.A_UNDERLINE
+    written = 0
+    for segment, attr in (
+        (text[:pos], base_attr),
+        (text[pos:pos + len(query)], hl_attr),
+        (text[pos + len(query):], base_attr),
+    ):
+        if not segment or written >= max_w:
+            continue
+        n = min(len(segment), max_w - written)
+        _safe_addstr(stdscr, y, x + written, segment, n, attr)
+        written += n
+    return written
+
+
+def render_line(stdscr, y, line, width, is_selected, collapsed, query="",
+                show_branch=False, preview_focused=False):
+    """Render a single tree line at row y."""
+    if y < 0:
+        return
+
+    # Selection style
+    if is_selected and preview_focused:
+        sel = curses.color_pair(CP_INACTIVE_SEL)
+    elif is_selected:
+        sel = curses.A_REVERSE
+    else:
+        sel = 0
+
+    if line["type"] == "header":
+        marker = MARKER_CLOSED if line["dir"] in collapsed else MARKER_OPEN
+        attr = curses.A_BOLD | curses.color_pair(CP_CYAN) | sel
+        if is_selected:
+            _safe_addstr(stdscr, y, 0, " " * width, width - 1, attr)
+        _safe_addstr(stdscr, y, 1, f"{marker} ", width - 2, attr)
+        dir_len = min(len(line["dir"]), width - 9)
+        _addstr_highlighted(stdscr, y, 3, line["dir"], dir_len, attr, query)
+        _safe_addstr(stdscr, y, 3 + dir_len, f" ({line['count']})", width - 3 - dir_len - 1, attr)
+        return
+
+    s = line["session"]
+    title = s["title"][:COL_TITLE]
+    branch = (s["git_branch"] or "")[:COL_BRANCH]
+
+    if is_selected:
+        _safe_addstr(stdscr, y, 0, " " * width, width - 1, sel)
+
+    x = 1
+    _safe_addstr(stdscr, y, x, f"  {line['connector']} ", width - x - 1, curses.A_DIM | sel)
+    x += TREE_INDENT - 1  # connector prefix length
+
+    title_attr = (curses.A_BOLD if s["named"] else 0) | sel
+    _addstr_highlighted(stdscr, y, x, f"{title:{COL_TITLE}s}", min(COL_TITLE, width - x - 1), title_attr, query)
+    x += COL_TITLE
+
+    meta = curses.A_DIM | sel
+    _safe_addstr(stdscr, y, x, f"  {s['relative_time']:>{COL_TIME}s}", width - x - 1, meta)
+    x += COL_TIME + COL_GAP
+    _safe_addstr(stdscr, y, x, f"  {s['message_count']:>{COL_MSGS}}", width - x - 1, meta)
+    x += COL_MSGS + COL_GAP
+
+    if show_branch:
+        _addstr_highlighted(stdscr, y, x, f"  {branch:{COL_BRANCH}s}", min(COL_BRANCH + COL_GAP, width - x - 1), meta, query)
+
+
+def render_preview(stdscr, x_start, y_start, preview_w, preview_h,
+                   meta_lines, msg_lines, msg_scroll, focused=False,
+                   click_regions=None):
+    """Render preview pane: box border, pinned metadata, scrollable messages."""
+    if preview_w < MIN_PREVIEW_W:
+        return
+
+    border = curses.color_pair(CP_CYAN) if focused else curses.A_DIM
+    x_end = x_start + preview_w - 1
+
+    # Box border
+    _safe_addstr(stdscr, y_start - 1, x_start, BOX_T_DOWN, 1, border)
+    for cx in range(x_start + 1, x_end):
+        _safe_addstr(stdscr, y_start - 1, cx, BOX_H, 1, border)
+    _safe_addstr(stdscr, y_start - 1, x_end, BOX_CORNER_TR, 1, border)
+    for row in range(y_start, y_start + preview_h):
+        _safe_addstr(stdscr, row, x_start, BOX_V, 1, border)
+        _safe_addstr(stdscr, row, x_end, BOX_V, 1, border)
+    bot_y = y_start + preview_h
+    _safe_addstr(stdscr, bot_y, x_start, BOX_CORNER_BL, 1, border)
+    for cx in range(x_start + 1, x_end):
+        _safe_addstr(stdscr, bot_y, cx, BOX_H, 1, border)
+    _safe_addstr(stdscr, bot_y, x_end, BOX_CORNER_BR, 1, border)
+
+    content_x = x_start + 2
+    content_w = preview_w - 4
+
+    if not meta_lines and not msg_lines:
+        _safe_addstr(stdscr, y_start, content_x, "No session selected", min(19, content_w), curses.A_DIM)
+        return
+
+    # Pinned metadata (with clickable values underlined)
+    y = y_start
+    regions = click_regions or []
+    for meta_row, (text, attr_name) in enumerate(meta_lines):
+        if y >= y_start + preview_h:
+            break
+        base_attr = ATTR_MAP.get(attr_name, 0)
+        # Render full line first
+        _safe_addstr(stdscr, y, content_x, text[:content_w], content_w, base_attr)
+        # Overlay clickable values with underline
+        for r in regions:
+            if r["row"] == meta_row:
+                vx = content_x + r["x_start"]
+                vlen = r["x_end"] - r["x_start"]
+                val_text = text[r["x_start"]:r["x_end"]]
+                _safe_addstr(stdscr, y, vx, val_text, min(vlen, content_w - r["x_start"]),
+                             curses.A_UNDERLINE | curses.color_pair(CP_CYAN))
+        y += 1
+
+    if not msg_lines:
+        return
+
+    # Separator
+    if y < y_start + preview_h:
+        _safe_addstr(stdscr, y, content_x, BOX_H * content_w, content_w, curses.A_DIM)
+        y += 1
+
+    # Scrollable messages
+    msg_area_h = y_start + preview_h - y
+    if msg_area_h <= 0:
+        return
+
+    arrow_attr = curses.color_pair(CP_CYAN) if focused else curses.A_DIM
+    max_scroll = max(0, len(msg_lines) - msg_area_h)
+    if max_scroll > 0 and msg_scroll > 0:
+        _safe_addstr(stdscr, y, x_end - 2, ARROW_UP, 1, arrow_attr)
+    if max_scroll > 0 and msg_scroll < max_scroll:
+        _safe_addstr(stdscr, y + msg_area_h - 1, x_end - 2, ARROW_DOWN, 1, arrow_attr)
+
+    for i in range(msg_area_h):
+        line_idx = msg_scroll + i
+        if line_idx >= len(msg_lines):
+            break
+        text, attr_name = msg_lines[line_idx]
+        _safe_addstr(stdscr, y + i, content_x, text[:content_w], content_w, ATTR_MAP.get(attr_name, 0))
+
+
+def render_help(stdscr, y, width, filtering, preview_focused=False):
+    """Render the bottom help bar."""
+    if filtering:
+        text = "  Type to filter | Enter: select | Esc: back"
+    elif preview_focused:
+        text = f"  {ARROW_UP}{ARROW_DOWN}: scroll | PgUp/PgDn: page | Left/Esc: back to tree"
+    else:
+        text = (f"  {ARROW_UP}{ARROW_DOWN}: move | Left/Right: fold/preview | Enter: resume"
+                " | /: search | c: toggle all | b: branch | d/r: del/rename | q: quit")
+    _safe_addstr(stdscr, y, 0, text, width - 1, curses.A_DIM)
+
+
+# -- Navigation helpers --
+
+
+def find_next(lines, current, direction):
+    """Find next line in given direction."""
+    idx = current + direction
+    return idx if 0 <= idx < len(lines) else current
+
+
+def toggle_fold(collapsed, dir_path):
+    """Toggle collapsed state for a directory."""
+    collapsed.symmetric_difference_update({dir_path})
+
+
+def msg_scroll_max(msg_lines, tree_height, meta_lines):
+    """Max scroll offset for preview messages."""
+    msg_area = tree_height - len(meta_lines) - 1  # subtract meta + separator
+    return max(0, len(msg_lines) - msg_area)
+
+
+# -- Session actions (prompts rendered inside the search box) --
+
+
+def _box_width(width):
+    """Search box width, consistent with render_header_bar."""
+    return min(width - 1, max(width - 1, tree_columns_width(True) + 6))
+
+
+def _render_box_content(stdscr, width, text, attr):
+    """Render text inside the search box area (row 2)."""
+    inner_w = _box_width(width) - 2
+    _safe_addstr(stdscr, 2, 1, f"{text:{inner_w}s}", inner_w, attr)
+
+
+def _draw_prompt_box(stdscr, width, attr):
+    """Draw the search box border with a given attribute."""
+    box_w = _box_width(width)
+    _safe_addstr(stdscr, 1, 0, BOX_TL + BOX_H * (box_w - 2) + BOX_TR, width - 1, attr)
+    _safe_addstr(stdscr, 2, 0, BOX_V, 1, attr)
+    _safe_addstr(stdscr, 2, box_w - 1, BOX_V, 1, attr)
+    _safe_addstr(stdscr, 3, 0, BOX_BL + BOX_H * (box_w - 2) + BOX_BR, width - 1, attr)
+
+
+def confirm_prompt(stdscr, confirm_key=ord("d")):
+    """Delete confirmation inside the search box. Returns True if confirmed."""
+    _, width = stdscr.getmaxyx()
+    inner_w = _box_width(width) - 2
+    _draw_prompt_box(stdscr, width, curses.A_BOLD | curses.color_pair(CP_RED))
+    # "Press d again to delete" bold, "(or another key to Cancel)" dim italic
+    x = 1
+    bold_part = " Press d again to delete "
+    dim_part = "(or another key to cancel)"
+    _safe_addstr(stdscr, 2, x, f"{' ' * inner_w}", inner_w)  # clear line
+    _safe_addstr(stdscr, 2, x, bold_part, min(len(bold_part), inner_w), curses.A_BOLD)
+    x += len(bold_part)
+    _safe_addstr(stdscr, 2, x, dim_part, min(len(dim_part), inner_w - len(bold_part)), curses.A_DIM)
+    stdscr.refresh()
+    return stdscr.getch() == confirm_key
+
+
+def text_prompt(stdscr, prompt_text, placeholder=""):
+    """Text input with placeholder inside the search box. Returns string or None."""
+    _, width = stdscr.getmaxyx()
+    inner_w = _box_width(width) - 2
+    text = ""
+    active = curses.A_BOLD | curses.color_pair(CP_CYAN)
+
+    while True:
+        _draw_prompt_box(stdscr, width, active)
+        # Clear the content area
+        _safe_addstr(stdscr, 2, 1, " " * inner_w, inner_w)
+        # "New name: " in bold
+        label = f" {prompt_text}: "
+        _safe_addstr(stdscr, 2, 1, label, min(len(label), inner_w), curses.A_BOLD)
+        x = 1 + len(label)
+        remaining = inner_w - len(label)
+        if text:
+            # Show typed text (normal weight) + cursor
+            display = text + CURSOR_BLOCK
+            _safe_addstr(stdscr, 2, x, display, min(len(display), remaining))
+        elif placeholder:
+            # Show placeholder as dim + cursor at start
+            _safe_addstr(stdscr, 2, x, CURSOR_BLOCK, 1)
+            _safe_addstr(stdscr, 2, x + 1, placeholder[:remaining - 1], remaining - 1, curses.A_DIM)
+        else:
+            _safe_addstr(stdscr, 2, x, CURSOR_BLOCK, 1)
+
+        stdscr.refresh()
+        key = stdscr.getch()
+
+        if key in KEY_ESC_OR_QUIT:
+            return None
+        elif key in KEY_ENTER_CODES:
+            return text if text else None
+        elif key in KEY_BACKSPACE_CODES:
+            if text:
+                text = text[:-1]
+            else:
+                return None  # backspace on empty = cancel
+        elif 32 <= key <= 126:
+            text += chr(key)
+
+
+def delete_session(stdscr, session):
+    """Delete a session's JSONL and companion directory after confirmation."""
+    if not confirm_prompt(stdscr):
+        return False
+    return cu_sessions.delete(session["jsonl_path"])
+
+
+def rename_session(stdscr, session):
+    """Rename a session via prompt, writing to its JSONL."""
+    placeholder = session["title"] if session["named"] else ""
+    new_name = text_prompt(stdscr, "New name", placeholder=placeholder)
+    if not new_name or not new_name.strip():
+        return None
+    new_name = new_name.strip()
+    if cu_sessions.rename(session["jsonl_path"], session["session_id"], new_name):
+        return new_name
+    return None
+
+
+# -- Main loop --
+
+
+def _reload_data():
+    """Reload sessions and rebuild groups."""
+    return build_groups(load_sessions())
+
+
+def main(stdscr):
+    curses.set_escdelay(25)
+    stdscr.keypad(True)
+    curses.raw()  # deliver Ctrl+C as key code 3 instead of SIGINT
+    curses.curs_set(0)
+    curses.use_default_colors()
+    curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+    curses.mouseinterval(0)
+    curses.init_pair(CP_CYAN, curses.COLOR_CYAN, -1)
+    curses.init_pair(CP_YELLOW, curses.COLOR_YELLOW, -1)
+    curses.init_pair(CP_RED, curses.COLOR_RED, -1)
+    curses.init_pair(CP_INACTIVE_SEL, curses.COLOR_WHITE, 58)
+
+    sessions = load_sessions()
+    if not sessions:
+        stdscr.addstr(0, 0, "No sessions found.")
+        stdscr.getch()
+        return None
+
+    groups = build_groups(sessions)
+    collapsed = {d for d, _ in groups}  # start all collapsed
+
+    # UI state
+    filter_query = ""
+    filtering = False
+    preview_focused = False
+    show_branch = False
+    scroll_offset = 0
+    selected = 0
+    preview_scroll = 0
+    preview_meta = []
+    preview_msgs = []
+    preview_clicks = []
+    preview_session_id = None
+    preview_cached_w = 0
+
+    while True:
+        stdscr.erase()
+        height, width = stdscr.getmaxyx()
+        tree_height = height - HEADER_ROWS - 1
+
+        visible, total = build_visible(groups, collapsed, filter_query)
+
+        # Clamp selection
+        if visible:
+            selected = max(0, min(selected, len(visible) - 1))
+        else:
+            selected = 0
+
+        # Scroll tree to keep selection visible (show group header above if needed)
+        scroll_target = selected
+        if (visible and 0 < selected < len(visible)
+                and visible[selected]["type"] == "session"
+                and visible[selected - 1]["type"] == "header"):
+            scroll_target = selected - 1
+        if scroll_target < scroll_offset:
+            scroll_offset = scroll_target
+        if selected >= scroll_offset + tree_height:
+            scroll_offset = selected - tree_height + 1
+        scroll_offset = max(0, scroll_offset)
+
+        # Layout
+        tree_w = tree_columns_width(show_branch)
+        preview_w = width - tree_w - 1
+        if preview_w < MIN_PREVIEW_W:
+            preview_w = 0
+            tree_w = width
+
+        # Load preview when selection changes
+        if visible and 0 <= selected < len(visible):
+            sel_line = visible[selected]
+            sel_session = sel_line.get("session") if sel_line["type"] == "session" else None
+            sel_id = sel_session["session_id"] if sel_session else None
+            if sel_id != preview_session_id or preview_w != preview_cached_w:
+                preview_session_id = sel_id
+                preview_cached_w = preview_w
+                preview_scroll = 0
+                if sel_session:
+                    preview_meta, preview_msgs, preview_clicks = build_preview_data(sel_session, preview_w - 4)
+                else:
+                    preview_meta, preview_msgs, preview_clicks = [], [], []
+
+        # Render
+        render_header_bar(stdscr, width, filter_query, filtering, total,
+                          tree_w=tree_w, show_branch=show_branch)
+
+        no_results = filter_query and not any(l["type"] == "session" for l in visible)
+        if no_results:
+            _safe_addstr(stdscr, HEADER_ROWS, 2, "No matching sessions", tree_w - 3, curses.A_DIM)
+        else:
+            for i in range(tree_height):
+                line_idx = scroll_offset + i
+                if line_idx >= len(visible):
+                    break
+                is_sel = line_idx == selected and not filtering
+                render_line(stdscr, HEADER_ROWS + i, visible[line_idx], tree_w,
+                            is_sel, collapsed, filter_query,
+                            show_branch=show_branch, preview_focused=preview_focused)
+
+        render_preview(stdscr, tree_w, HEADER_ROWS, preview_w, tree_height,
+                       preview_meta, preview_msgs, preview_scroll,
+                       click_regions=preview_clicks,
+                       focused=preview_focused)
+        render_help(stdscr, height - 1, width, filtering, preview_focused)
+        stdscr.refresh()
+
+        key = stdscr.getch()
+
+        # -- Mouse --
+        if key == curses.KEY_MOUSE:
+            try:
+                _, mx, my, _, bstate = curses.getmouse()
+                in_preview = mx >= tree_w
+                scroll_up = bool(bstate & curses.BUTTON4_PRESSED)
+                scroll_down = bool(bstate & (curses.BUTTON5_PRESSED | 2097152))
+                is_click = bool(bstate & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED))
+
+                if is_click and not in_preview:
+                    if HEADER_ROWS <= my < HEADER_ROWS + tree_height:
+                        line_idx = scroll_offset + (my - HEADER_ROWS)
+                        if 0 <= line_idx < len(visible):
+                            selected = line_idx
+                            filtering = False
+                            if visible[line_idx]["type"] == "header":
+                                toggle_fold(collapsed, visible[line_idx]["dir"])
+                elif in_preview:
+                    if is_click and preview_clicks:
+                        # Check if click hits a metadata value
+                        meta_row = my - HEADER_ROWS
+                        click_x = mx - (tree_w + 2)  # content_x offset
+                        for r in preview_clicks:
+                            if r["row"] == meta_row and r["x_start"] <= click_x < r["x_end"]:
+                                _osc52_copy(r["value"])
+                                _flash(stdscr, my, tree_w + 2 + r["x_start"],
+                                       r["value"], r["x_end"] - r["x_start"])
+                                break
+                    max_ps = msg_scroll_max(preview_msgs, tree_height, preview_meta)
+                    if scroll_up:
+                        preview_scroll = max(preview_scroll - 3, 0)
+                    elif scroll_down:
+                        preview_scroll = min(preview_scroll + 3, max_ps)
+                else:
+                    if scroll_up:
+                        selected = max(selected - 3, 0)
+                    elif scroll_down:
+                        selected = min(selected + 3, len(visible) - 1) if visible else 0
+            except curses.error:
+                pass
+            continue
+
+        # -- Keyboard: search mode --
+        if filtering:
+            if key in KEY_ESC_OR_QUIT:
+                filtering = False
+                if not any(l["type"] == "session" for l in visible):
+                    filter_query = ""
+                    scroll_offset = 0
+            elif key in KEY_BACKSPACE_CODES:
+                if filter_query:
+                    filter_query = filter_query[:-1]
+                else:
+                    filtering = False
+                scroll_offset = 0
+            elif key in KEY_ENTER_CODES:
+                if 0 <= selected < len(visible):
+                    line = visible[selected]
+                    if line["type"] == "session":
+                        return line["session"]
+                    elif line["type"] == "header":
+                        toggle_fold(collapsed, line["dir"])
+            elif key in KEY_DOWN_CODES:
+                if not no_results:
+                    filtering = False
+            elif key in KEY_UP_CODES:
+                pass
+            elif 32 <= key <= 126:
+                filter_query += chr(key)
+                selected = 0
+                scroll_offset = 0
+
+        # -- Keyboard: preview focused --
+        elif preview_focused:
+            max_ps = msg_scroll_max(preview_msgs, tree_height, preview_meta)
+            if key in KEY_ESC_OR_QUIT or key in KEY_LEFT_CODES:
+                preview_focused = False
+            elif key in KEY_UP_CODES:
+                preview_scroll = max(preview_scroll - 1, 0)
+            elif key in KEY_DOWN_CODES:
+                preview_scroll = min(preview_scroll + 1, max_ps)
+            elif key == curses.KEY_PPAGE or key == KEY_CTRL_U:
+                preview_scroll = max(preview_scroll - tree_height, 0)
+            elif key == curses.KEY_NPAGE or key == KEY_CTRL_D:
+                preview_scroll = min(preview_scroll + tree_height, max_ps)
+
+        # -- Keyboard: tree navigation --
+        else:
+            if key == ord("q") or key in KEY_ESC_OR_QUIT:
+                return None
+            elif key == ord("/") or key == ord("s"):
+                filtering = True
+            elif key == ord("b"):
+                show_branch = not show_branch
+                preview_session_id = None  # force preview rebuild
+            elif key == ord("c"):
+                all_dirs = {d for d, _ in groups}
+                if collapsed >= all_dirs:
+                    collapsed.clear()
+                else:
+                    collapsed = all_dirs.copy()
+            elif key == ord("d"):
+                if 0 <= selected < len(visible) and visible[selected]["type"] == "session":
+                    if delete_session(stdscr, visible[selected]["session"]):
+                        groups = _reload_data()
+            elif key == ord("r"):
+                if 0 <= selected < len(visible) and visible[selected]["type"] == "session":
+                    if rename_session(stdscr, visible[selected]["session"]):
+                        groups = _reload_data()
+            elif key in KEY_UP_CODES:
+                if selected == 0:
+                    filtering = True
+                else:
+                    selected = find_next(visible, selected, -1)
+            elif key in KEY_DOWN_CODES:
+                selected = find_next(visible, selected, 1)
+            elif key in KEY_LEFT_CODES:
+                if 0 <= selected < len(visible):
+                    line = visible[selected]
+                    d = line["dir"] if line["type"] == "header" else line.get("dir", "")
+                    collapsed.add(d)
+                    if line["type"] == "session":
+                        for idx in range(selected - 1, -1, -1):
+                            if visible[idx]["type"] == "header" and visible[idx]["dir"] == d:
+                                selected = idx
+                                break
+            elif key in KEY_RIGHT_CODES:
+                if 0 <= selected < len(visible):
+                    line = visible[selected]
+                    if line["type"] == "header":
+                        collapsed.discard(line["dir"])
+                    elif line["type"] == "session" and preview_msgs:
+                        preview_focused = True
+            elif key == curses.KEY_PPAGE:
+                selected = max(selected - tree_height, 0)
+            elif key == curses.KEY_NPAGE:
+                selected = min(selected + tree_height, len(visible) - 1) if visible else 0
+            elif key in KEY_ENTER_CODES:
+                if 0 <= selected < len(visible):
+                    line = visible[selected]
+                    if line["type"] == "session":
+                        return line["session"]
+                    elif line["type"] == "header":
+                        toggle_fold(collapsed, line["dir"])
+
+    return None
+
+
+if __name__ == "__main__":
+    try:
+        selected = curses.wrapper(main)
+    except KeyboardInterrupt:
+        sys.exit(0)
+
+    if selected is None:
+        sys.exit(0)
+
+    session_dir = selected["dir"].replace("~", os.path.expanduser("~"), 1)
+    print(f"Resuming session in {selected['dir']}...")
+    os.chdir(session_dir)
+    os.execvp("claude", ["claude", "--resume", selected["session_id"]])

@@ -29,6 +29,9 @@ id_ed25519*
 .claude/shell-snapshots/
 .claude/settings.local.json
 
+# Python bytecode
+__pycache__/
+
 # Editor and OS artifacts
 *.swp
 *.swo

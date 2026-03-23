@@ -31,7 +31,7 @@ cd ~/dotfiles
 | Package | Target | Contents |
 |---------|--------|----------|
 | `dotfiles` | `~/` | Git, fish, tmux, bash, claude configs, shared env and login script |
-| `tools` | `~/.local/bin/` | Standalone commands (`cw` tmux workspace manager) |
+| `tools` | `~/.local/bin/` | Standalone commands: `cw` (tmux workspaces), `claude-sessions` (session browser), `ssh-refresh-agent` |
 
 ### What's in `dotfiles`
 
@@ -45,6 +45,14 @@ cd ~/dotfiles
 ### What's in `tools`
 
 - **`cw`**: tmux workspace manager. Run `cw --help` for usage.
+- **`claude-sessions`**: Cross-directory Claude Code session browser. Python curses TUI with:
+  - Collapsible tree view grouped by directory, with search/filter bar and match highlighting
+  - Live preview pane showing conversation history (navigable with arrow keys or mouse scroll)
+  - Session metadata columns (time, messages, optional branch via `b`)
+  - Actions: Enter to resume, `d` to delete, `r` to rename, `c` to collapse/expand all
+  - Uses `claude_utils/index.py` to scan all `~/.claude/projects/` session files
+- **`ssh-refresh-agent`**:
+Manual command to fix SSH agent in stale tmux sessions. Run `ssh-refresh-agent` to find a live socket and update the symlink, or `ssh-refresh-agent --check` to test. Called automatically by `pre_env.sh` on shell startup.
 
 ## Shared environment
 
@@ -64,10 +72,6 @@ POSIX shell scripts executed by the env loader before and after parsing `env.con
 - `post_env.sh` - runs after `env.conf`: system info display via fastfetch
 
 **Important limitation:** since fish runs these as subprocesses, environment changes inside the scripts won't affect the calling fish shell. Only use for side-effect operations. For environment changes, use `env.conf`.
-
-### `ssh-refresh-agent` (in tools)
-
-Manual command to fix SSH agent in stale tmux sessions. Run `ssh-refresh-agent` to find a live socket and update the symlink, or `ssh-refresh-agent --check` to test. Called automatically by `pre_env.sh` on shell startup.
 
 ## Identity
 
