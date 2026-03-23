@@ -555,7 +555,7 @@ def confirm_prompt(stdscr, confirm_key=ord("d")):
     return stdscr.getch() == confirm_key
 
 
-def text_prompt(stdscr, prompt_text, placeholder=""):
+def text_prompt(stdscr, prompt_text, placeholder="", allow_empty=False):
     """Text input with placeholder inside the search box. Returns string or None."""
     _, width = stdscr.getmaxyx()
     inner_w = _box_width(width) - 2
@@ -588,7 +588,9 @@ def text_prompt(stdscr, prompt_text, placeholder=""):
         if key in KEY_ESC_OR_QUIT:
             return None
         elif key in KEY_ENTER_CODES:
-            return text if text else None
+            if text or allow_empty:
+                return text
+            return None
         elif key in KEY_BACKSPACE_CODES:
             if text:
                 text = text[:-1]
@@ -606,15 +608,29 @@ def delete_session(stdscr, session):
 
 
 def rename_session(stdscr, session):
-    """Rename a session via prompt, writing to its JSONL."""
-    placeholder = session["title"] if session["named"] else ""
-    new_name = text_prompt(stdscr, "New name", placeholder=placeholder)
-    if not new_name or not new_name.strip():
+    """Rename a session via prompt, or auto-name with Enter on empty input (unnamed only)."""
+    if session["named"]:
+        # Named session: show current name as placeholder, Enter on empty cancels
+        new_name = text_prompt(stdscr, "New name", placeholder=session["title"])
+        if not new_name or not new_name.strip():
+            return None
+        new_name = new_name.strip()
+        if cu_sessions.rename(session["jsonl_path"], session["session_id"], new_name):
+            return new_name
         return None
-    new_name = new_name.strip()
-    if cu_sessions.rename(session["jsonl_path"], session["session_id"], new_name):
-        return new_name
-    return None
+    else:
+        # Unnamed session: Enter on empty triggers auto-name
+        new_name = text_prompt(stdscr, "New name", placeholder="Enter for auto-name...", allow_empty=True)
+        if new_name is None:
+            return None
+        new_name = new_name.strip()
+        if new_name:
+            if cu_sessions.rename(session["jsonl_path"], session["session_id"], new_name):
+                return new_name
+            return None
+        _render_box_content(stdscr, stdscr.getmaxyx()[1], " Generating name...", curses.A_DIM)
+        stdscr.refresh()
+        return cu_sessions.auto_name(session["jsonl_path"], session["session_id"])
 
 
 # -- Main loop --

@@ -38,7 +38,9 @@ cd ~/dotfiles
 - **Git**: aliases, delta pager, difftastic, rebase settings. Identity via `[include]` from `~/.gitconfig.local`
 - **Fish**: shell config, shared env loader
 - **Tmux**: Ctrl-a prefix, mouse, splits, OSC52 clipboard, bell notifications
-- **Claude**: Claude Code settings, Catppuccin status line, global agent instructions (CLAUDE.md)
+- **Claude**: Claude Code settings, Catppuccin status line, global agent instructions (CLAUDE.md), SessionEnd hooks:
+  - `auto-cleanup-session.py` - deletes trivially empty sessions on exit
+  - `auto-name-session.py` - generates titles for unnamed sessions via Claude haiku
 - **Bash**: `.bashrc.d/` snippets for env loading and login script sourcing
 - **Shared env** (`~/.config/env/`): `env.conf` and `login.sh` used by both bash and fish (see below)
 

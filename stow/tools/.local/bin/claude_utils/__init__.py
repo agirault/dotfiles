@@ -7,5 +7,5 @@ Submodules:
 """
 
 from .text import clean, extract, is_system, is_useful  # noqa: F401
-from .sessions import delete, rename, is_trivially_empty, load_messages  # noqa: F401
+from .sessions import delete, rename, is_trivially_empty, load_messages, has_custom_title, get_user_messages  # noqa: F401
 from .schema import Session  # noqa: F401

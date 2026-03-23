@@ -13,7 +13,15 @@ SYSTEM_PREFIXES = (
     "[Request interrupted by user",
 )
 
-TRIVIAL_MESSAGES = frozenset(("", "/exit", "exit", "hi", "hello", "/clear"))
+TRIVIAL_MESSAGES = frozenset((
+    "", "/exit", "exit", "hi", "hello", "/clear",
+    "resume", "continue", "no response requested.", "no response requested",
+))
+
+TRIVIAL_PREFIXES = (
+    "continue from where",
+    "this session is being continued from",
+)
 
 
 def clean(text: str) -> str:
@@ -30,7 +38,12 @@ def is_useful(text: str) -> bool:
     """Check if text is a non-trivial, non-system user message."""
     if not text or is_system(text):
         return False
-    return clean(text).lower() not in TRIVIAL_MESSAGES
+    cleaned = clean(text).lower()
+    if cleaned in TRIVIAL_MESSAGES:
+        return False
+    if any(cleaned.startswith(p) for p in TRIVIAL_PREFIXES):
+        return False
+    return True
 
 
 def extract(entry: dict) -> str:
