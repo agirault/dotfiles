@@ -4,24 +4,31 @@
 
 - Never use emdash `—` (U+2014), only hyphen `-` (U+002D)
 
+## Shell
+
+My interactive shell is fish, when providing commands for me to run, use the fix syntax if the POSIX alternative isn't compatible. Do stick to Bash for shell scripts.
+
 ## Git
 
 ## Local
 
-
 ### Committing
 
-- When you are ready to commit, use the following command which checks whether my GPG key is unlocked first, then uses my `git cm` alias to commit with message:
+My commits are GPG signed, therefore:
 
-    ```bash
-    printf "" | gpg2 --clear-sign --no-tty --pinentry-mode error -o /dev/null && git cm "..."
-    ```
+**1. Try to commit like so** - non-interactive probe; fail fast if signing cannot work:
 
-- If the gpg-agent is locked, paste the command below with the message you planned ti use, for me to copy and paste.
+```bash
+printf "" | gpg2 --clear-sign --no-tty --pinentry-mode error -o /dev/null && git cm "..."
+```
 
-    ```bash
-    printf "" | gpg2 --clear-sign --no-tty && git cm "..."
-    ```
+Use a normal multiline message inside the closing `"..."` (no heredoc).
+
+**2. Copy/Paste the command below otherwise** - interactive terminal can complete pinentry prompts.
+
+```fish
+printf "" | gpg2 --clear-sign && git cm "..."
+```
 
 ## Remote
 
