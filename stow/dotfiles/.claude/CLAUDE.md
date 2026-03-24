@@ -2,11 +2,29 @@
 
 ## Style
 
-- never use \u2014, only `-`
+- Never use emdash `—` (U+2014), only hyphen `-` (U+002D)
 
 ## Git
 
-- Use my `git cm` alias for committing with a message and signing off.
+## Local
+
+
+### Committing
+
+- When you are ready to commit, use the following command which checks whether my GPG key is unlocked first, then uses my `git cm` alias to commit with message:
+
+    ```bash
+    printf "" | gpg2 --clear-sign --no-tty --pinentry-mode error -o /dev/null && git cm "..."
+    ```
+
+- If the gpg-agent is locked, paste the command below with the message you planned ti use, for me to copy and paste.
+
+    ```bash
+    printf "" | gpg2 --clear-sign --no-tty && git cm "..."
+    ```
+
+## Remote
+
 - Use `gh` for GitHub remote operations.
 - Use `glab` for GitLab remote operations.
 
