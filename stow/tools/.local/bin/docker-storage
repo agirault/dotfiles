@@ -1,0 +1,1157 @@
+#!/usr/bin/env bash
+# docker-storage - Docker storage management tool
+#
+# Usage:
+#   docker-storage                      audit storage (default)
+#   docker-storage -v|--verbose         audit with individual item listing
+#   docker-storage mounts               list build cache mounts
+#   docker-storage prune [TARGETS]      prune dangling/orphaned data
+#   docker-storage backend              show current storage backend
+#   docker-storage backend BACKEND      switch backend (requires sudo)
+#   docker-storage --help               show this help
+#
+# The audit shows:
+#   - Active storage backend (images, build layer cache, orphans)
+#   - Inactive storage backend (leftover from driver switch)
+#   - Docker volumes (dangling, orphaned)
+#
+# Prune targets (combine multiple):
+#   images, imgs, i       dangling images
+#   cache, build, bc, b   dangling build cache
+#   dangling, d           images + cache (default)
+#   orphans, o            orphaned FS entries (default)
+#   mounts, m             cache mounts (not in default)
+#   inactive, stale       inactive backend (switches, prunes, switches back; not in default)
+#
+# Backends:
+#   overlay2, overlay, o2     legacy overlay2 driver
+#   containerd, ctrd, ctr     containerd snapshotter
+#
+# Requires sudo for accurate disk sizes and full orphan detection.
+
+set -euo pipefail
+
+show_help() {
+    local lines=()
+    while IFS= read -r line; do
+        lines+=("$line")
+    done < <(sed -n '2,/^[^#]/{ /^#/s/^# \?//p }' "$0")
+
+    local total=${#lines[@]}
+    local prev_empty=false
+    for ((i=0; i<total; i++)); do
+        local line="${lines[$i]}"
+        if [[ -z "$line" ]]; then
+            echo ""
+            prev_empty=true
+        elif [[ $i -eq $((total - 1)) ]]; then
+            # Last line: dim yellow background
+            echo "${BG_YELLOW_DIM}${line}${RESET}"
+        elif $prev_empty && [[ $i -gt 0 ]]; then
+            echo "${BOLD}${line}${RESET}"
+            prev_empty=false
+        else
+            local first="${line%% *}"
+            local rest="${line#* }"
+            if [[ "$first" == "$rest" ]]; then
+                echo "$line"
+            else
+                echo "${YELLOW}${first}${RESET} ${rest}"
+            fi
+            prev_empty=false
+        fi
+    done
+}
+
+# --- Formatting ---
+
+if [[ -t 1 ]]; then
+    BOLD=$'\033[1m'    DIM=$'\033[2m'    ITALIC=$'\033[3m'
+    GREEN=$'\033[32m'  YELLOW=$'\033[33m'  RED=$'\033[31m'  BLUE=$'\033[34m'  CYAN=$'\033[36m'
+    BG_GREEN=$'\033[42;30m'  BG_RED=$'\033[41;37m'  BG_BLUE=$'\033[44;37m'  BG_YELLOW=$'\033[43;30m'
+    BG_YELLOW_DIM=$'\033[48;5;58;37m'
+    RESET=$'\033[0m'
+else
+    BOLD="" DIM="" ITALIC="" GREEN="" YELLOW="" RED="" BLUE="" CYAN="" BG_GREEN="" BG_RED="" BG_BLUE="" BG_YELLOW="" BG_YELLOW_DIM="" RESET=""
+fi
+
+success() { echo "${GREEN}$1${RESET}"; }
+warn()    { echo "${YELLOW}$1${RESET}"; }
+err()     { echo "${RED}$1${RESET}" >&2; }
+dim()     { echo "${DIM}$1${RESET}"; }
+
+# --- Common helpers ---
+
+human_size() {
+    numfmt --to=iec-i --suffix=B "$1" 2>/dev/null || echo "${1}B"
+}
+
+require_readable() {
+    if [[ ! -e "$1" ]] && [[ ! -d "$(dirname "$1")" || ! -x "$(dirname "$1")" ]]; then
+        NEEDS_ROOT_NOTE=true
+        return 1
+    fi
+    if [[ ! -d "$1" ]]; then
+        return 1
+    fi
+    if [[ ! -r "$1" ]]; then
+        NEEDS_ROOT_NOTE=true
+        return 1
+    fi
+}
+
+human_du() {
+    local bytes
+    bytes=$(safe_du "$1") || { echo ""; return; }
+    human_size "$bytes"
+}
+
+safe_du() {
+    local du_output
+    du_output=$(du -sb "$1" 2>&1) || true
+    if echo "$du_output" | grep -qi 'permission denied\|no such file\|not a directory'; then
+        return 1
+    fi
+    echo "$du_output" | cut -f1
+}
+
+parse_docker_size() {
+    local val="$1"
+    [[ -z "$val" || "$val" == "0B" ]] && echo 0 && return
+    val="${val%B}"
+    val="${val/k/K}"
+    numfmt --from=si "$val" 2>/dev/null || echo 0
+}
+
+# --- Storage paths ---
+
+DOCKER_ROOT="/var/lib/docker"
+CONTAINERD_ROOT="/var/lib/containerd"
+OVERLAY2_DIR="$DOCKER_ROOT/overlay2"
+LAYERDB_DIR="$DOCKER_ROOT/image/overlay2/layerdb"
+BUILDKIT_DIR="$DOCKER_ROOT/buildkit"
+CONTAINERD_SNAP_DIR="$CONTAINERD_ROOT/io.containerd.snapshotter.v1.overlayfs/snapshots"
+CONTAINERD_CONTENT_DIR="$CONTAINERD_ROOT/io.containerd.content.v1.content"
+
+is_prune() { [[ "$COMMAND" == "prune" ]]; }
+
+get_driver() { docker info --format '{{.Driver}}' 2>/dev/null; }
+is_containerd() { [[ "${1:-$DOCKER_DRIVER}" == "overlayfs" ]]; }
+driver_to_backend() { is_containerd "${1:-}" && echo "containerd" || echo "overlay2"; }
+backend_to_driver() { [[ "$1" == "containerd" ]] && echo "overlayfs" || echo "overlay2"; }
+
+should_prune_cat() {
+    case "$1" in
+        images)   $PRUNE_IMAGES ;;
+        cache)    $PRUNE_CACHE ;;
+        orphans)  $PRUNE_ORPHANS ;;
+        mounts)   $PRUNE_MOUNTS ;;
+        volumes)  $PRUNE_IMAGES ;;
+        inactive) $PRUNE_INACTIVE ;;
+        *)        false ;;
+    esac
+}
+
+detect_storage_paths() {
+    DOCKER_DRIVER=$(get_driver) || {
+        err "ERROR: cannot query Docker - is the daemon running?"
+        return 1
+    }
+    if is_containerd; then
+        OVERLAY_PATH="$CONTAINERD_SNAP_DIR"
+    elif [[ "$DOCKER_DRIVER" == "overlay2" ]]; then
+        OVERLAY_PATH="$OVERLAY2_DIR"
+    else
+        err "Unsupported storage driver: $DOCKER_DRIVER"
+        return 1
+    fi
+}
+
+# --- Containerd helpers ---
+
+find_ctr_socket() {
+    CTR_ADDR=""
+    for sock in /run/docker/containerd/containerd.sock /run/containerd/containerd.sock; do
+        if [[ -S "$sock" ]]; then
+            CTR_ADDR="$sock"
+            return 0
+        fi
+    done
+    return 1
+}
+
+run_ctr() {
+    local cmd=(ctr)
+    [[ -n "${CTR_ADDR:-}" ]] && cmd+=(-a "$CTR_ADDR")
+    cmd+=(-n moby)
+    "${cmd[@]}" "$@"
+}
+
+VERBOSE=false
+COMMAND="audit"
+PRUNE_IMAGES=false
+PRUNE_CACHE=false
+PRUNE_ORPHANS=false
+PRUNE_MOUNTS=false
+PRUNE_INACTIVE=false
+PRUNE_SET=false
+BACKEND_TARGET=""
+
+# Prune target parser
+parse_prune_target() {
+    case "$1" in
+        i|im|img|imgs|images) PRUNE_IMAGES=true; PRUNE_SET=true ;;
+        b|build|c|cache|bc)   PRUNE_CACHE=true; PRUNE_SET=true ;;
+        d|dangling)           PRUNE_IMAGES=true; PRUNE_CACHE=true; PRUNE_SET=true ;;
+        o|orphan|orphans)     PRUNE_ORPHANS=true; PRUNE_SET=true ;;
+        m|mounts)             PRUNE_MOUNTS=true; PRUNE_SET=true ;;
+        inactive|stale)       PRUNE_INACTIVE=true; PRUNE_SET=true ;;
+        *) return 1 ;;
+    esac
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --help|-h) show_help; exit 0 ;;
+        --verbose|-v) VERBOSE=true ;;
+        mounts) COMMAND="mounts" ;;
+        prune)
+            COMMAND="prune"
+            # Consume following prune targets
+            while [[ $# -gt 1 ]] && parse_prune_target "$2"; do
+                shift
+            done
+            ;;
+        backend)
+            COMMAND="backend"
+            if [[ $# -gt 1 ]]; then
+                case "$2" in
+                    overlay2|overlay|o2) BACKEND_TARGET="overlay2"; shift ;;
+                    containerd|ctrd|ctr) BACKEND_TARGET="containerd"; shift ;;
+                esac
+            fi
+            ;;
+        *) err "Unknown argument: $1"; echo ""; show_help; exit 1 ;;
+    esac
+    shift
+done
+
+# Default prune targets: dangling images + cache + orphans (not mounts)
+if is_prune && ! $PRUNE_SET; then
+    PRUNE_IMAGES=true
+    PRUNE_CACHE=true
+    PRUNE_ORPHANS=true
+fi
+
+# --- State ---
+
+NEEDS_ROOT_NOTE=false
+CLEANUP_CMDS=()  # format: "category|mark|command"
+MARK_IDX=0
+MARK_SYMS=("*" "†" "‡" "§" "‖" "¶")
+
+next_mark() {
+    MARK="${YELLOW}${MARK_SYMS[$MARK_IDX]}${RESET}"
+    MARK_RAW="${MARK_SYMS[$MARK_IDX]}"
+    MARK_IDX=$((MARK_IDX + 1))
+}
+
+# --- Output helpers ---
+
+# 3-column output: indent, key, value, size
+# Size column starts at fixed position (column 42) for alignment
+COL_SIZE=43
+kvn() {
+    local indent=$1 key=$2 val=${3:-} size=${4:-}
+    local pad=""
+    for ((i=0; i<indent; i++)); do pad+="  "; done
+    local key_col=$((17 - indent * 2))
+    local left="${pad}$(printf "%-*s" "$key_col" "$key:")${val:+ $val}"
+    if [[ -n "$size" ]]; then
+        # Strip ANSI codes to measure visible width
+        local visible
+        visible=$(echo "$left" | sed 's/\x1b\[[0-9;]*m//g')
+        local visible_len=${#visible}
+        local padding=$((COL_SIZE - visible_len))
+        [[ $padding -lt 1 ]] && padding=1
+        printf "%s%*s%s\n" "$left" "$padding" "" "$size"
+    else
+        printf "%s\n" "$left"
+    fi
+}
+kv()  { kvn 1 "$@"; }
+kv2() { kvn 2 "$@"; }
+kv3() { kvn 3 "$@"; }
+kv4() { kvn 4 "$@"; }
+kv5() { kvn 5 "$@"; }
+
+not_accessible() { NEEDS_ROOT_NOTE=true; echo "${BG_YELLOW_DIM}?${RESET}"; }
+not_accessible_fs() { NEEDS_ROOT_NOTE=true; echo "${BG_YELLOW_DIM}${CYAN}?${RESET}"; }
+
+# Aligned list item: "      - name                (size)"
+list_item() {
+    local indent=$1 name=$2 size=${3:-}
+    local pad=""
+    for ((i=0; i<indent; i++)); do pad+="  "; done
+    local left="${pad}$name"
+    if [[ -n "$size" ]]; then
+        local visible
+        visible=$(echo "$left" | sed 's/\x1b\[[0-9;]*m//g')
+        local padding=$((COL_SIZE - ${#visible}))
+        [[ $padding -lt 1 ]] && padding=1
+        printf "%s%*s%s\n" "$left" "$padding" "" "$size"
+    else
+        echo "$left"
+    fi
+}
+
+# Sum du -sb for a list of dir names under a base path.
+# Args: base_dir dir_names...
+sum_du() {
+    local base=$1
+    shift
+    local total=0
+    for name in "$@"; do
+        local bytes
+        bytes=$(safe_du "$base/$name") || bytes=0
+        total=$((total + bytes))
+    done
+    echo "$total"
+}
+
+badge() {
+    local bg=$1 label=$2 title=$3
+    echo "${bg} ${label} ${RESET} ${BOLD}${title}${RESET}"
+}
+
+# Size string: "X GiB" or "(not accessible)*"
+size_or_na() {
+    local bytes
+    if bytes=$(safe_du "$1"); then
+        echo "($(human_size "$bytes"))"
+    else
+        echo "($(not_accessible))"
+    fi
+}
+
+# Report dangling items. Adds cleanup command if count > 0.
+report_dangling() {
+    local kv_fn=$1 label=$2 count=$3 size_str=$4 list_cmd=$5 remove_cmd=$6 parent=${7:-} category=${8:-dangling}
+
+    local ratio=""
+    [[ -n "$parent" ]] && ratio="/${parent}"
+
+    # Hide if parent is 0 (nothing to be dangling from)
+    [[ -n "$parent" && "$parent" -eq 0 ]] && return
+
+    if [[ "$count" -eq 0 ]]; then
+        $kv_fn "$label" "$(success "$count")${ratio}" ""
+        return
+    fi
+
+    next_mark
+    $kv_fn "$label" "$(warn "$count")${ratio}" "$(warn "($size_str)") $MARK"
+    if $VERBOSE; then
+        while IFS= read -r item; do
+            [[ -n "$item" ]] && list_item 3 "$(warn "$item")"
+        done < <(eval "$list_cmd")
+    fi
+    CLEANUP_CMDS+=("${category}|${MARK_RAW}|${remove_cmd}")
+}
+
+# Report orphaned dirs. Adds cleanup command if count > 0.
+report_orphaned() {
+    local kv_fn=$1 dir=$2 stop_docker=$3 fs_total=$4
+    shift 4
+    local orphans=("$@")
+
+    if [[ ${#orphans[@]} -eq 0 ]]; then
+        $kv_fn "Orphans" "${CYAN}0${RESET}/${fs_total:-?}" ""
+        return
+    fi
+
+    next_mark
+    if [[ "${HAS_DISK_ACCESS:-false}" == true ]]; then
+        local total_bytes=0 sizes=()
+        for orphan in "${orphans[@]}"; do
+            local bytes
+            bytes=$(safe_du "$dir/$orphan") || bytes=0
+            total_bytes=$((total_bytes + bytes))
+            sizes+=("$bytes $orphan")
+        done
+        $kv_fn "Orphans" "${CYAN}${#orphans[@]}${RESET}/${fs_total:-?}" "$(warn "($(human_size "$total_bytes"))") $MARK"
+        if $VERBOSE; then
+            printf '%s\n' "${sizes[@]}" | sort -rn | while read -r bytes name; do
+                list_item 3 "$(warn "$name")" "$(warn "($(human_size "$bytes"))")"
+            done
+        fi
+    else
+        $kv_fn "Orphans" "${CYAN}${#orphans[@]}${RESET}/${fs_total:-?}" "$MARK"
+        if $VERBOSE; then
+            for orphan in "${orphans[@]}"; do
+                list_item 3 "$(warn "$orphan")"
+            done
+        fi
+    fi
+
+    local cmd=""
+    if [[ "$stop_docker" == "true" ]]; then
+        cmd="sudo systemctl stop docker && sudo rm -rf"
+    else
+        cmd="sudo rm -rf"
+    fi
+    for orphan in "${orphans[@]}"; do
+        cmd+=" $dir/$orphan"
+    done
+    [[ "$stop_docker" == "true" ]] && cmd+=" && sudo systemctl start docker"
+    CLEANUP_CMDS+=("orphans|${MARK_RAW}|${cmd}")
+}
+
+# --- Images (shared between backends) ---
+# Requires: DF_RAW, DANGLING_IMAGES
+# Args: layer_count (number of layers/chainIDs)
+show_images() {
+    local layer_count=${1:-}
+
+    local img_count img_size_raw img_reclaimable_raw
+    img_count=$(echo "$DF_RAW" | awk '$1 == "Images" {print $2}')
+    img_size_raw=$(echo "$DF_RAW" | awk '$1 == "Images" {print $4}')
+    img_reclaimable_raw=$(echo "$DF_RAW" | awk '$1 == "Images" {print $5}')
+    local img_size_bytes img_reclaimable_bytes
+    img_size_bytes=$(parse_docker_size "${img_size_raw:-0B}")
+    img_reclaimable_bytes=$(parse_docker_size "${img_reclaimable_raw:-0B}")
+
+    local img_unique
+    img_unique=$(docker inspect --format='{{range .RootFS.Layers}}{{.}} {{end}}' $(docker image ls -q 2>/dev/null | sort -u) 2>/dev/null | tr ' ' '\n' | sort -u | grep -c '.' 2>/dev/null) || img_unique="?"
+
+    local dangling_img_count
+    dangling_img_count=$(echo "$DANGLING_IMAGES" | grep -c '.' 2>/dev/null) || dangling_img_count=0
+
+    kv "Images" "${img_count:-0}" "($(human_size "$img_size_bytes"))"
+    if [[ -n "$layer_count" ]]; then
+        kv2 "Chains" "${CYAN}${layer_count}${RESET}"
+    else
+        kv2 "Chains" "$(not_accessible_fs)"
+    fi
+    kv2 "Layers" "${img_unique}"
+    report_dangling kv2 "Dangling" "$dangling_img_count" "$(human_size "$img_reclaimable_bytes")" \
+        "echo \"\$DANGLING_IMAGES\"" \
+        "docker image prune -f" \
+        "${img_count:-0}" \
+        "images"
+}
+
+# --- Build cache (shared between backends) ---
+# Requires: BUILDX_ENTRIES, bx_on_disk (associative array of IDs with on-disk dirs)
+# Args: kv_header kv_sub kv_subsub kv_subsubsub (output functions at each indent level)
+show_build_layer_cache() {
+    local kvh=$1 kvs=$2 kvss=$3 kvsss=$4
+
+    # Internal = has own dir on disk. Shared = metadata only (in image layers).
+    # Dangling = Shared=false (Private in buildx terms), regular only.
+    local bc_count=0
+    local int_regular=0 int_context=0 int_frontend=0 int_bytes=0
+    local int_regular_bytes=0 int_context_bytes=0 int_frontend_bytes=0
+    local shr_regular=0 shr_context=0 shr_frontend=0 shr_bytes=0
+    local shr_regular_bytes=0 shr_context_bytes=0 shr_frontend_bytes=0
+    local cm_count=0 cm_bytes=0
+    local dang_internal=0 dang_internal_bytes=0
+    local dang_shared=0 dang_shared_bytes=0
+
+    while IFS=$'\t' read -r id type shared size_raw; do
+        [[ -z "$id" ]] && continue
+        local size_bytes
+        size_bytes=$(parse_docker_size "$size_raw")
+
+        # Cache mounts: separate category
+        if [[ "$type" == "exec.cachemount" ]]; then
+            cm_count=$((cm_count + 1))
+            cm_bytes=$((cm_bytes + size_bytes))
+            continue
+        fi
+        bc_count=$((bc_count + 1))
+
+        local is_internal=false
+        [[ -n "${bx_on_disk[$id]+x}" ]] && is_internal=true
+
+        if $is_internal; then
+            int_bytes=$((int_bytes + size_bytes))
+            case "$type" in
+                regular)      int_regular=$((int_regular+1)); int_regular_bytes=$((int_regular_bytes+size_bytes)) ;;
+                source.local) int_context=$((int_context+1)); int_context_bytes=$((int_context_bytes+size_bytes)) ;;
+                frontend)     int_frontend=$((int_frontend+1)); int_frontend_bytes=$((int_frontend_bytes+size_bytes)) ;;
+            esac
+        else
+            shr_bytes=$((shr_bytes + size_bytes))
+            case "$type" in
+                regular)      shr_regular=$((shr_regular+1)); shr_regular_bytes=$((shr_regular_bytes+size_bytes)) ;;
+                source.local) shr_context=$((shr_context+1)); shr_context_bytes=$((shr_context_bytes+size_bytes)) ;;
+                frontend)     shr_frontend=$((shr_frontend+1)); shr_frontend_bytes=$((shr_frontend_bytes+size_bytes)) ;;
+            esac
+        fi
+
+        # Dangling = Private (Shared=false), regular only
+        if [[ "$shared" == "false" && "$type" == "regular" ]]; then
+            if $is_internal; then
+                dang_internal=$((dang_internal + 1))
+                dang_internal_bytes=$((dang_internal_bytes + size_bytes))
+            else
+                dang_shared=$((dang_shared + 1))
+                dang_shared_bytes=$((dang_shared_bytes + size_bytes))
+            fi
+        fi
+    done <<< "$BUILDX_ENTRIES"
+
+    local bc_internal=$((int_regular + int_context + int_frontend))
+    local bc_shared=$((shr_regular + shr_context + shr_frontend))
+    local bc_dangling=$((dang_internal + dang_shared))
+    local bc_dangling_bytes=$((dang_internal_bytes + dang_shared_bytes))
+    local bc_total=$((bc_count + cm_count))
+    local bc_total_bytes=$((shr_bytes + int_bytes + cm_bytes))
+
+    $kvh "Build cache" "$bc_total" "($(human_size "$bc_total_bytes"))"
+    $kvs "Shared" "${bc_shared}/${bc_total}" "($(human_size "$shr_bytes"), in image layers)"
+    if $VERBOSE; then
+        [[ $shr_regular -gt 0 ]] && $kvss "Regular" "$shr_regular" "($(human_size "$shr_regular_bytes"))"
+        [[ $shr_context -gt 0 ]] && $kvss "Context" "$shr_context" "($(human_size "$shr_context_bytes"))"
+        [[ $shr_frontend -gt 0 ]] && $kvss "Frontend" "$shr_frontend" "($(human_size "$shr_frontend_bytes"))"
+    fi
+    $kvs "Internal" "${CYAN}${bc_internal}${RESET}/${bc_total}" "($(human_size "$int_bytes"))"
+    if $VERBOSE; then
+        [[ $int_regular -gt 0 ]] && $kvss "Regular" "$int_regular" "($(human_size "$int_regular_bytes"))"
+        [[ $int_context -gt 0 ]] && $kvss "Context" "$int_context" "($(human_size "$int_context_bytes"))"
+        [[ $int_frontend -gt 0 ]] && $kvss "Frontend" "$int_frontend" "($(human_size "$int_frontend_bytes"))"
+    fi
+    $kvs "Cache mounts" "${CYAN}${cm_count}${RESET}/${bc_total}" "($(human_size "$cm_bytes"))"
+    if $VERBOSE && [[ $cm_count -gt 0 ]]; then
+        echo "$BUILDX_ENTRIES" | awk -F'\t' '$2 == "exec.cachemount" {print $1, $4}' | while read -r id size; do
+            list_item 3 "${DIM}$id${RESET}" "${DIM}($size)${RESET}"
+        done
+    fi
+    if [[ $bc_total -eq 0 ]]; then
+        :  # hide dangling when no build cache at all
+    elif [[ $bc_dangling -eq 0 ]]; then
+        $kvs "Dangling" "$(success "0")/${bc_total}"
+    else
+        next_mark
+        $kvs "Dangling" "$(warn "${bc_dangling}")/${bc_total}" "$(warn "($(human_size "$bc_dangling_bytes"))") $MARK"
+        if [[ $dang_shared -gt 0 ]]; then
+            $kvss "Shared" "$(warn "${dang_shared}/${bc_dangling}")" "$(warn "($(human_size "$dang_shared_bytes"), in image layers)")"
+        else
+            $kvss "Shared" "${dang_shared}/${bc_dangling}" "($(human_size "$dang_shared_bytes"), in image layers)"
+        fi
+        if $VERBOSE && [[ $dang_shared -gt 0 ]]; then
+            echo "$BUILDX_ENTRIES" | while IFS=$'\t' read -r id type shared size_raw; do
+                [[ "$shared" == "false" && "$type" == "regular" && -z "${bx_on_disk[$id]+x}" ]] && list_item 3 "$(warn "$id")" "$(warn "($size_raw)")" || true
+            done
+        fi
+        if [[ $dang_internal -gt 0 ]]; then
+            $kvss "Internal" "$(warn "${dang_internal}/${bc_dangling}")" "$(warn "($(human_size "$dang_internal_bytes"))")"
+        else
+            $kvss "Internal" "${dang_internal}/${bc_dangling}" "($(human_size "$dang_internal_bytes"))"
+        fi
+        if $VERBOSE && [[ $dang_internal -gt 0 ]]; then
+            echo "$BUILDX_ENTRIES" | while IFS=$'\t' read -r id type shared size_raw; do
+                [[ "$shared" == "false" && "$type" == "regular" && -n "${bx_on_disk[$id]+x}" ]] && list_item 3 "$(warn "$id")" "$(warn "($size_raw)")" || true
+            done
+        fi
+        CLEANUP_CMDS+=("cache|${MARK_RAW}|docker buildx prune --filter type=regular -f")
+    fi
+}
+
+# --- Data collection ---
+
+collect_data() {
+    detect_storage_paths || exit 1
+
+    # Check disk access
+    HAS_DISK_ACCESS=false
+    if is_containerd; then
+        safe_du "$CONTAINERD_ROOT" >/dev/null 2>&1 && HAS_DISK_ACCESS=true
+    else
+        safe_du "$OVERLAY2_DIR" >/dev/null 2>&1 && HAS_DISK_ACCESS=true
+    fi
+    $HAS_DISK_ACCESS || NEEDS_ROOT_NOTE=true
+
+    # Docker CLI data (cached)
+    DF_RAW=$(docker system df 2>/dev/null) || DF_RAW=""
+    DF_VERBOSE=$(docker system df -v 2>/dev/null) || DF_VERBOSE=""
+    BUILDX_VERBOSE=$(docker buildx du --verbose 2>/dev/null) || BUILDX_VERBOSE=""
+    DANGLING_IMAGES=$(docker image ls --format '{{.ID}} ({{.Size}})' -f dangling=true 2>/dev/null) || DANGLING_IMAGES=""
+    DANGLING_VOLUMES=$(docker volume ls -qf dangling=true 2>/dev/null) || DANGLING_VOLUMES=""
+
+    # Parse buildx entries: ID\tTYPE\tSHARED\tSIZE
+    BUILDX_ENTRIES=$(echo "$BUILDX_VERBOSE" | awk '
+        /^ID:/ { id=$2 }
+        /^Type:/ { type=$2 }
+        /^Shared:/ { shared=$2 }
+        /^Size:/ { size=$2 }
+        /^$/ { if(id) printf "%s\t%s\t%s\t%s\n", id, type, shared, size; id="" }
+        END { if(id) printf "%s\t%s\t%s\t%s\n", id, type, shared, size }
+    ')
+
+}
+
+# --- Active backend (shared display, backend-specific data) ---
+
+# Collect layer count for images.
+# Sets: IMG_LAYER_COUNT, on_disk (array), can_read, bx_on_disk (assoc array)
+collect_overlay2_data() {
+    local overlay_dir="$OVERLAY2_DIR"
+    ACTIVE_PATH="$overlay_dir"
+    ACTIVE_LABEL="Legacy overlay2"
+    ACTIVE_FS_LABEL="directories"
+    ACTIVE_EXTRA_PATHS=()
+
+    can_read=false
+    if require_readable "$overlay_dir"; then
+        can_read=true
+        mapfile -t on_disk < <(
+            find "$overlay_dir" -maxdepth 1 -mindepth 1 -type d \
+                ! -name 'l' ! -name 'backingFsBlockDev' \
+                -printf '%f\n' | sort
+        )
+    fi
+
+    # Image layer refs (layerdb cache-ids)
+    declare -gA img_ref=()
+    if [[ -d "$LAYERDB_DIR" ]]; then
+        while IFS= read -r f; do
+            img_ref["$(< "$f")"]=1
+        done < <(find "$LAYERDB_DIR" -path '*/sha256/*/cache-id' 2>/dev/null)
+    fi
+    if [[ -d "$LAYERDB_DIR/mounts" ]]; then
+        while IFS= read -r f; do
+            local id; id="$(< "$f")"
+            img_ref["$id"]=1; img_ref["${id}-init"]=1
+        done < <(find "$LAYERDB_DIR/mounts" -name 'mount-id' 2>/dev/null)
+    fi
+    for config in "$DOCKER_ROOT"/containers/*/config.v2.json; do
+        [[ -f "$config" ]] || continue
+        while IFS= read -r id; do
+            img_ref["$id"]=1
+        done < <(grep -oP '/overlay2/\K[a-f0-9]{25,}' "$config" 2>/dev/null | sort -u)
+    done
+    IMG_LAYER_COUNT=${#img_ref[@]}
+
+    # Buildx IDs on disk
+    declare -gA bx_on_disk=()
+    if $can_read; then
+        local all_on_disk_set=""
+        for d in "${on_disk[@]}"; do all_on_disk_set+="$d"$'\n'; done
+        while IFS=$'\t' read -r id type shared size_raw; do
+            [[ -z "$id" ]] && continue
+            if echo "$all_on_disk_set" | grep -qx "$id"; then
+                bx_on_disk["$id"]="$type"
+            fi
+        done <<< "$BUILDX_ENTRIES"
+    fi
+}
+
+collect_containerd_data() {
+    ACTIVE_PATH="$CONTAINERD_ROOT"
+    ACTIVE_LABEL="Containerd snapshotter"
+    ACTIVE_FS_LABEL="snapshots"
+    local content_rel="${CONTAINERD_CONTENT_DIR#$CONTAINERD_ROOT/}"
+    local snap_rel="${CONTAINERD_SNAP_DIR%/snapshots}"
+    snap_rel="${snap_rel#$CONTAINERD_ROOT/}"
+    ACTIVE_EXTRA_PATHS=(
+        "Content:├── $content_rel:$CONTAINERD_CONTENT_DIR"
+        "Snapshots:└── $snap_rel:$CONTAINERD_SNAP_DIR"
+    )
+
+    can_read=false
+    if require_readable "$CONTAINERD_SNAP_DIR"; then
+        can_read=true
+        mapfile -t on_disk < <(
+            find "$CONTAINERD_SNAP_DIR" -maxdepth 1 -mindepth 1 -type d \
+                -printf '%f\n' | sort -n
+        )
+    fi
+
+    # Image layer count from ctr
+    local ctr_output
+    ctr_output=$(run_ctr snapshots ls 2>/dev/null) || true
+    if [[ -n "$ctr_output" ]]; then
+        IMG_LAYER_COUNT=$(echo "$ctr_output" | tail -n +2 | awk '$1 ~ /^sha256:/' | wc -l)
+    else
+        IMG_LAYER_COUNT=""
+    fi
+
+    # Buildx IDs in ctr snapshots
+    local ctr_snap_names=""
+    ctr_snap_names=$(run_ctr snapshots ls 2>/dev/null | tail -n +2 | awk '{print $1}') || true
+
+    declare -gA bx_on_disk=()
+    while IFS=$'\t' read -r id type shared size_raw; do
+        [[ -z "$id" ]] && continue
+        if echo "$ctr_snap_names" | grep -qx "$id"; then
+            bx_on_disk["$id"]="$type"
+        fi
+    done <<< "$BUILDX_ENTRIES"
+
+    declare -gA img_ref=()  # not used for containerd orphan detection
+}
+
+# Collect orphans: FS entries not referenced by images or buildx.
+# Uses img_ref (image layer refs) and bx_on_disk (buildx entries with dirs).
+# On overlay2: finds specific dirs. On containerd: count only (auto-GC'd).
+collect_orphans() {
+    ORPHANS=()
+    CONTAINERD_ORPHAN_COUNT=0
+
+    # Build reference set: image refs + all buildx IDs
+    declare -gA ref_map=()
+    for key in "${!img_ref[@]}"; do ref_map["$key"]=1; done || true
+    for key in "${!bx_on_disk[@]}"; do ref_map["$key"]=1; done || true
+    # Also add buildx IDs that don't have dirs (to avoid false positives on overlay2)
+    while IFS=$'\t' read -r id type shared size_raw; do
+        [[ -n "$id" ]] && ref_map["$id"]=1
+    done <<< "$BUILDX_ENTRIES"
+
+    if is_containerd; then
+        # Containerd: on-disk dirs are numeric IDs that don't match snapshot names.
+        # Use arithmetic: FS entries - (sha256 count + buildx in ctr count).
+        local sha256_count
+        sha256_count=$(run_ctr snapshots ls 2>/dev/null | tail -n +2 | awk '$1 ~ /^sha256:/' | wc -l) || sha256_count=0
+        local known_count=$((sha256_count + ${#bx_on_disk[@]}))
+        local disk_count=${#on_disk[@]}
+        CONTAINERD_ORPHAN_COUNT=$((disk_count - known_count))
+        [[ $CONTAINERD_ORPHAN_COUNT -lt 0 ]] && CONTAINERD_ORPHAN_COUNT=0 || true
+        # Containerd auto-GCs orphans on next docker operation.
+    else
+        # Overlay2: dir names match buildx/image IDs, can identify specific orphans.
+        for name in "${on_disk[@]}"; do
+            [[ -z "${ref_map[$name]+x}" ]] && ORPHANS+=("$name") || true
+        done
+    fi
+}
+
+# Shared active section display
+section_active() {
+    local orphan_fn=$1 orphan_dir=$2
+
+    badge "$BG_GREEN" "active" "$ACTIVE_LABEL"
+
+    # Path + size
+    kv "Path" "$ACTIVE_PATH" "$(size_or_na "$ACTIVE_PATH")"
+
+    # Extra paths (containerd content + snapshots)
+    for extra in "${ACTIVE_EXTRA_PATHS[@]}"; do
+        local label="${extra%%:*}"
+        local rest="${extra#*:}"
+        local display="${rest%%:*}"
+        local du_path="${rest#*:}"
+        kv "$label" "$display" "$(size_or_na "$du_path")"
+    done
+
+    # FS entries
+    if $can_read; then
+        kv "FS entries" "${CYAN}${#on_disk[@]}${RESET} ${ACTIVE_FS_LABEL}"
+        if [[ ${#on_disk[@]} -eq 0 ]]; then
+            return
+        fi
+    else
+        kv "FS entries" "$(not_accessible_fs)"
+    fi
+
+    # Images
+    show_images "$IMG_LAYER_COUNT"
+
+    # Build cache
+    show_build_layer_cache kv kv2 kv3 kv4
+
+    # Orphans
+    if $can_read; then
+        $orphan_fn
+        if [[ ${#ORPHANS[@]} -gt 0 ]]; then
+            # Overlay2: we know specific dirs
+            report_orphaned kv "$orphan_dir" "true" "${#on_disk[@]}" "${ORPHANS[@]}"
+        elif [[ -n "${CONTAINERD_ORPHAN_COUNT:-}" && "$CONTAINERD_ORPHAN_COUNT" -gt 0 ]]; then
+            next_mark
+            kv "Orphans" "${CYAN}${CONTAINERD_ORPHAN_COUNT}${RESET}/${#on_disk[@]}" "$MARK"
+            CLEANUP_CMDS+=("orphans|${MARK_RAW}|auto-GC'd on next docker operation")
+        else
+            kv "Orphans" "${CYAN}0${RESET}/${#on_disk[@]}"
+        fi
+    else
+        kv "Orphans" "$(not_accessible_fs)"
+    fi
+}
+
+# --- Inactive backend ---
+
+section_inactive() {
+    local label=$1 layer_path=$2 layer_rm=$3
+
+    badge "$BG_RED" "inactive" "$label"
+
+    local has_data=false
+    if require_readable "$layer_path"; then
+        # Check for actual layer data (not just metadata dirs)
+        local count=0
+        if [[ "$layer_rm" == */containerd* ]]; then
+            # Containerd: check for snapshots (blobs alone are just metadata residue)
+            count=$(find "$CONTAINERD_SNAP_DIR" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l) || count=0
+        else
+            # Overlay2: check for layer dirs (exclude bookkeeping and bug artifacts)
+            count=$(find "$layer_path" -maxdepth 1 -mindepth 1 -type d \
+                ! -name 'l' ! -name 'backingFsBlockDev' ! -name 'opaque-bug-check*' \
+                2>/dev/null | wc -l) || count=0
+        fi
+        [[ "$count" -gt 0 ]] && has_data=true || true
+    else
+        # Can't read - show N/A, don't suggest cleanup
+        kv "Path" "$layer_rm" "$(size_or_na "$layer_rm")"
+        return
+    fi
+
+    if $has_data; then
+        next_mark
+        kv "Path" "$(warn "$layer_rm")" "$(warn "$(size_or_na "$layer_rm")") $MARK"
+        local inactive_backend current_backend
+        is_containerd && inactive_backend="overlay2" || inactive_backend="containerd"
+        current_backend=$(driver_to_backend)
+        CLEANUP_CMDS+=("inactive|${MARK_RAW}|$0 backend ${inactive_backend} && docker system prune -af && docker buildx prune -af && $0 backend ${current_backend}")
+    else
+        kv "Path" "$layer_rm" "$(size_or_na "$layer_rm")"
+    fi
+}
+
+# --- BuildKit ---
+
+# BuildKit section removed - cache mounts shown under Build cache.
+# BuildKit dir contains metadata DBs + backend-specific data that can't be
+# cleanly separated.
+
+# --- Volumes ---
+
+section_volumes() {
+    local vol_dir="$DOCKER_ROOT/volumes"
+
+    badge "$BG_BLUE" "volumes" "Docker volumes"
+    kv "Path" "$vol_dir" "$(size_or_na "$vol_dir")"
+
+    # FS entries
+    local vol_readable=false
+    local vol_on_disk="" fs_count=0
+    if require_readable "$vol_dir"; then
+        vol_readable=true
+        vol_on_disk=$(find "$vol_dir" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null \
+            | grep -v '^backingFsBlockDev$' | sort || true)
+        fs_count=$(echo "$vol_on_disk" | grep -c '.' 2>/dev/null || true)
+        kv "FS entries" "${CYAN}${fs_count}${RESET}"
+        if [[ "$fs_count" -eq 0 ]]; then
+            return
+        fi
+    else
+        kv "FS entries" "$(not_accessible_fs)"
+    fi
+
+    # Docker-reported volumes
+    local vol_total vol_size_raw vol_reclaimable_raw
+    vol_total=$(echo "$DF_RAW" | awk '/^Local Volumes/ {print $3}')
+    vol_size_raw=$(echo "$DF_RAW" | awk '/^Local Volumes/ {print $5}')
+    vol_reclaimable_raw=$(echo "$DF_RAW" | awk '/^Local Volumes/ {print $6}')
+    local vol_size_bytes vol_reclaimable_bytes
+    vol_size_bytes=$(parse_docker_size "${vol_size_raw:-0B}")
+    vol_reclaimable_bytes=$(parse_docker_size "${vol_reclaimable_raw:-0B}")
+    local vol_dangling
+    vol_dangling=$(echo "$DANGLING_VOLUMES" | grep -c '.' 2>/dev/null) || vol_dangling=0
+
+    kv "Volumes" "${CYAN}${vol_total:-0}${RESET}" "($(human_size "$vol_size_bytes"))"
+    report_dangling kv2 "Dangling" "$vol_dangling" "$(human_size "$vol_reclaimable_bytes")" \
+        "echo \"\$DF_VERBOSE\" | awk '/^VOLUME NAME/{p=1;next} /^\$/{p=0} p && \$2==0 {printf \"%s (%s)\\n\", \$1, \$NF}'" \
+        "docker volume prune -f" \
+        "${vol_total:-0}" \
+        "volumes"
+
+    # Orphans
+    if $vol_readable; then
+        declare -A vol_known=()
+        while IFS= read -r v; do
+            [[ -n "$v" ]] && vol_known["$v"]=1
+        done < <(docker volume ls -q 2>/dev/null)
+
+        local vol_orphans=()
+        while IFS= read -r v; do
+            [[ -n "$v" && -z "${vol_known[$v]+x}" ]] && vol_orphans+=("$v")
+        done <<< "$vol_on_disk"
+
+        report_orphaned kv "$vol_dir" "true" "$fs_count" "${vol_orphans[@]}"
+    else
+        kv "Orphans" "$(not_accessible_fs)"
+    fi
+}
+
+# --- Backend subcommand ---
+
+cmd_backend() {
+    local target="${1:-}"
+    local daemon_json="/etc/docker/daemon.json"
+
+    if [[ -z "$target" ]]; then
+        # Show current backend
+        local driver
+        driver=$(get_driver) || {
+            err "ERROR: cannot query Docker - is the daemon running?"
+            exit 1
+        }
+        echo "$(driver_to_backend "$driver")"
+        exit 0
+    fi
+
+    # Switch backend
+    if ! command -v jq >/dev/null 2>&1; then
+        err "ERROR: jq is required"
+        exit 1
+    fi
+    if [[ ! -f "$daemon_json" ]]; then
+        err "ERROR: $daemon_json not found"
+        exit 1
+    fi
+    if [[ $EUID -ne 0 ]]; then
+        err "ERROR: must run as root to switch backend"
+        err "  sudo $(basename "$0") backend $target"
+        exit 1
+    fi
+
+    local enable
+    case "$target" in
+        containerd) enable=true ;;
+        overlay2)   enable=false ;;
+        *)          err "Usage: $(basename "$0") backend [overlay2|containerd]"; exit 1 ;;
+    esac
+
+    # Always update daemon.json (config may be out of sync with running state)
+    local file_bak="${daemon_json}.bak"
+    local file_tmp="${daemon_json}.tmp"
+    trap 'rm -f "$file_tmp"' EXIT
+
+    cp -- "$daemon_json" "$file_bak"
+    if [[ "$enable" == "false" ]]; then
+        # Switch to overlay2: remove containerd-snapshotter, set storage-driver
+        jq 'del(.features["containerd-snapshotter"]) | if .features == {} then del(.features) else . end | .["storage-driver"] = "overlay2"' \
+            "$file_bak" > "$file_tmp"
+    else
+        # Switch to containerd: set containerd-snapshotter, remove storage-driver
+        jq '.features["containerd-snapshotter"] = true | del(.["storage-driver"])' \
+            "$file_bak" > "$file_tmp"
+    fi
+
+    if diff -q "$file_bak" "$file_tmp" >/dev/null 2>&1; then
+        rm -f "$file_tmp" "$file_bak"
+        trap - EXIT
+    else
+        mv -- "$file_tmp" "$daemon_json"
+        trap - EXIT
+        echo "Updated $daemon_json (backup: $file_bak)"
+    fi
+
+    # Restart only if running driver doesn't match target
+    local expected
+    expected=$(backend_to_driver "$target")
+    local current_driver
+    current_driver=$(get_driver) || current_driver=""
+
+    if [[ "$current_driver" != "$expected" ]]; then
+        echo "Restarting Docker and containerd..."
+        systemctl reset-failed docker 2>/dev/null || true
+        systemctl stop docker.socket docker 2>/dev/null || true
+        systemctl restart containerd
+        systemctl start docker.socket docker
+        # Validate
+        current_driver=$(get_driver) || current_driver=""
+        if [[ "$current_driver" != "$expected" ]]; then
+            err "ERROR: expected $target but got driver '$current_driver'"
+            exit 1
+        fi
+        echo "Switched to $target."
+    else
+        echo "Already on $target."
+    fi
+}
+
+# --- Prune subcommand ---
+
+cmd_prune() {
+    if [[ ${#CLEANUP_CMDS[@]} -eq 0 ]]; then
+        echo ""
+        echo "${BOLD}Nothing to prune.${RESET}"
+        exit 0
+    fi
+
+    # Find which selected categories have matching commands
+    declare -A matched=()
+    for entry in "${CLEANUP_CMDS[@]}"; do
+        local c="${entry%%|*}"
+        should_prune_cat "$c" && matched["$c"]=1 || true
+    done
+
+    # Report unmatched categories (only for explicitly requested targets)
+    local no_match=()
+    if $PRUNE_SET; then
+        $PRUNE_IMAGES && [[ -z "${matched[images]+x}" && -z "${matched[volumes]+x}" ]] && no_match+=("images") || true
+        $PRUNE_CACHE && [[ -z "${matched[cache]+x}" ]] && no_match+=("cache") || true
+        $PRUNE_ORPHANS && [[ -z "${matched[orphans]+x}" && -z "${matched[inactive]+x}" ]] && no_match+=("orphans") || true
+        $PRUNE_MOUNTS && [[ -z "${matched[mounts]+x}" ]] && no_match+=("mounts") || true
+    fi
+    echo "${BOLD}Cleanup logs:${RESET}"
+    for entry in "${CLEANUP_CMDS[@]}"; do
+        local category="${entry%%|*}"
+        local rest="${entry#*|}"
+        local mark="${rest%%|*}"
+        local command="${rest#*|}"
+
+        if ! should_prune_cat "$category"; then
+            echo "  ${YELLOW}${mark}${RESET} ${DIM}unselected${RESET}"
+            continue
+        fi
+
+        # Informational entries
+        if [[ "$command" == auto-* ]]; then
+            echo "  ${YELLOW}${mark}${RESET} ${DIM}${command}${RESET}"
+            continue
+        fi
+
+        local output
+        output=$(eval "$command" 2>&1) || true
+        local first_line="${output%%$'\n'*}"
+        local rest="${output#*$'\n'}"
+        [[ "$rest" == "$output" ]] && rest=""  # no newline = single line
+        echo "  ${YELLOW}${mark}${RESET} ${DIM}${first_line}${RESET}"
+        if [[ -n "$rest" ]]; then
+            echo "$rest" | sed "s/^/    ${DIM}/" | sed "s/$/${RESET}/"
+        fi
+    done
+
+    if [[ ${#no_match[@]} -gt 0 ]]; then
+        echo ""
+        local str="${no_match[*]}"
+        echo "  ${BG_YELLOW_DIM}!! Nothing to prune for: ${str// /, }${RESET}"
+    fi
+}
+
+# --- Mounts subcommand ---
+
+cmd_mounts() {
+    detect_storage_paths || exit 1
+    if [[ "$DOCKER_DRIVER" == "overlayfs" ]]; then
+        find_ctr_socket || true
+    fi
+
+    local verbose_output
+    verbose_output=$(docker buildx du --filter 'type=exec.cachemount' --verbose 2>/dev/null) || true
+
+    if [[ -z "$verbose_output" ]] || ! echo "$verbose_output" | grep -q '^ID:'; then
+        echo "No cache mounts found."
+        exit 0
+    fi
+
+    # Parse ID, name, size from verbose output
+    echo "$verbose_output" | awk '
+        /^ID:/ { id=$2 }
+        /^Size:/ { size=$2 }
+        /with id "/ { match($0, /with id "\/([^"]+)/, m); name=m[1] }
+        /^$/ {
+            if(id) {
+                if(!name) name="-"
+                printf "%s\t%s\t%s\n", id, name, size
+            }
+            id=""; name=""; size=""
+        }
+        END {
+            if(id) {
+                if(!name) name="-"
+                printf "%s\t%s\t%s\n", id, name, size
+            }
+        }
+    ' | {
+    local any_na=false
+    while IFS=$'\t' read -r id name size; do
+        # Get filesystem path
+        local fs_path=""
+        local fs_size=""
+        if [[ "$DOCKER_DRIVER" == "overlay2" ]]; then
+            fs_path="$OVERLAY2_DIR/$id"
+            fs_size=$(human_du "$fs_path")
+        elif [[ "$DOCKER_DRIVER" == "overlayfs" ]]; then
+            local mount_out
+            mount_out=$(run_ctr snapshots mounts /tmp/test "$id" 2>/dev/null) || true
+            local snap_num
+            snap_num=$(echo "$mount_out" | grep -oP '/snapshots/\K[0-9]+' | head -1) || true
+            if [[ -n "$snap_num" ]]; then
+                fs_path="$CONTAINERD_SNAP_DIR/$snap_num/fs"
+                fs_size=$(human_du "$CONTAINERD_SNAP_DIR/$snap_num")
+            fi
+        fi
+
+        [[ -z "$fs_size" || -z "$fs_path" ]] && any_na=true || true
+        local na="${BG_YELLOW_DIM}?${RESET}"
+        echo "${BOLD}${name}${RESET}"
+        kv "ID" "$id"
+        kv "Size" "$size (Docker), ${fs_size:-$na} (disk)"
+        kv "Path" "${fs_path:-$na}"
+        echo ""
+    done
+
+    if $any_na; then
+        echo "  ${BG_YELLOW_DIM}?${RESET} ${ITALIC}not accessible, run with sudo for accurate disk sizes.${RESET}"
+    fi
+    }
+}
+
+# --- Audit subcommand ---
+
+cmd_audit() {
+    collect_data
+
+    if is_containerd; then
+        find_ctr_socket || true
+    fi
+
+    if is_containerd; then
+        collect_containerd_data
+        section_active collect_orphans "$CONTAINERD_SNAP_DIR"
+        echo ""
+        section_inactive "Legacy overlay2" "$OVERLAY2_DIR" "$OVERLAY2_DIR"
+    else
+        collect_overlay2_data
+        section_active collect_orphans "$OVERLAY2_DIR"
+        echo ""
+        section_inactive "Containerd snapshotter" "$CONTAINERD_SNAP_DIR" "$CONTAINERD_ROOT"
+    fi
+
+    echo ""
+    section_volumes
+
+    # Footer
+    if [[ ${#CLEANUP_CMDS[@]} -gt 0 ]]; then
+        echo ""
+        local hint=""
+        is_prune || hint=" ${DIM}(pass 'prune' to run)${RESET}"
+        echo "${BOLD}Cleanup commands:${RESET}${hint}"
+        for entry in "${CLEANUP_CMDS[@]}"; do
+            local rest="${entry#*|}"
+            local mark="${rest%%|*}"
+            local command="${rest#*|}"
+            echo "  ${YELLOW}${mark}${RESET} ${DIM}${command}${RESET}"
+        done
+    fi
+
+    if $NEEDS_ROOT_NOTE; then
+        echo ""
+        echo "  $(not_accessible) ${ITALIC}not accessible, run with sudo for accurate disk sizes and orphan detection.${RESET}"
+    fi
+}
+
+# --- Main ---
+
+case "$COMMAND" in
+    audit)   cmd_audit ;;
+    mounts)  cmd_mounts ;;
+    prune)   cmd_audit; cmd_prune ;;
+    backend) cmd_backend "$BACKEND_TARGET" ;;
+esac
+
+exit 0
