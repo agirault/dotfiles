@@ -37,6 +37,27 @@ printf "" | gpg2 --clear-sign && git cm "..."
 
 ## Agentic workflow
 
+### Tools over Bash
+
+When outside of a sandbox, avoid using Bash when a dedicated tool can accomplish the task instead:
+- **Read** files, not `cat`/`head`/`tail`/`less`
+- **Glob** for file lookup, not `find`/`ls`
+- **Grep** for content search, not `grep`/`rg`
+- **Edit** for modifications, not `sed`/`awk`
+- **Write** for file creation, not `echo`/`cat` with redirection
+
+Bash is only for commands that have no dedicated tool equivalent (e.g., `git`, `docker`, `make`, process management).
+
+**Exception for file modifications**: `sed`/`awk` may be preferred over Edit/Write when
+determinism is critical or the cost difference is dramatic (e.g., bulk regex replacements
+across many files, or surgical edits in large files where reproducing context from inference
+is error-prone). Edit/Write are inference-based - they require reproducing file content from
+memory, which is expensive and can drift. `sed`/`awk` are pattern-based and deterministic.
+Use this exception only when the user has not requested unattended/no-prompt execution for
+the session or task (since Bash might require permission approval).
+
+If you must use Bash, try to batch commands when possible to reduce the number of permission approval prompts.
+
 ### Memory/Rules
 
 Locations:
