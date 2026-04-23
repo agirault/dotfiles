@@ -1,73 +1,106 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
-# Catppuccin Mocha color definitions
-# Model colors
-REGULAR_COLOR='\033[1;38;2;243;139;168m'    # Red - regular models
-BOLD_1M_COLOR='\033[0;38;2;30;30;46;48;2;249;226;175m'  # Dark on yellow bg - 1M models
-# UI element colors
-DIR_COLOR='\033[0;38;2;137;180;250m'        # Blue - directory
-COST_COLOR='\033[0;38;2;203;166;247m'       # Mauve - cost
-# Context usage gradient (Catppuccin Mocha)
-CTX_GREEN='\033[0;38;2;166;227;161m'        # Green - low usage (0-50%)
-CTX_YELLOW='\033[0;38;2;249;226;175m'       # Yellow - moderate (50-75%)
-CTX_PEACH='\033[0;38;2;250;179;135m'        # Peach - high (75-90%)
-CTX_RED='\033[1;38;2;243;139;168m'          # Red bold - critical (90%+)
-RESET='\033[0m'
+command -v jq >/dev/null || { echo "jq required"; exit 1; }
 
 # Read JSON input from stdin
 input=$(cat)
 
-# Extract values using jq
-MODEL_DISPLAY=$(echo "$input" | jq -r '.model.display_name')
-CURRENT_DIR=$(echo "$input" | jq -r '.cwd')
-COST=$(echo "$input" | jq -r '.cost.total_cost_usd')
+# Extract fields without eval
+cwd=$(echo "$input" | jq -r '.workspace.current_dir // empty')
+model=$(echo "$input" | jq -r '.model.display_name // empty')
+output_style=$(echo "$input" | jq -r '.output_style.name // empty')
+used=$(echo "$input" | jq -r '.context_window.used_percentage // empty')
+session_cost=$(echo "$input" | jq -r '.cost.total_cost_usd // 0')
+session_id=$(echo "$input" | jq -r '.session_id // empty')
 
-# Extract context window info using current_usage (actual context state)
-CTX_SIZE=$(echo "$input" | jq -r '.context_window.context_window_size // 200000')
-USAGE=$(echo "$input" | jq '.context_window.current_usage')
+# Strip terminal control characters from untrusted display text.
+sanitize_for_terminal() {
+    printf '%s' "$1" | tr -d '\000-\037\177'
+}
 
-# Choose color based on whether model has "1M" in the name
-if [[ "$MODEL_DISPLAY" =~ 1M ]]; then
-    MODEL_COLOR="$BOLD_1M_COLOR"
-else
-    MODEL_COLOR="$REGULAR_COLOR"
+# Accumulate cost across sessions (this should be concurrent-safe and should reset monthly
+COST_DIR="$HOME/.claude/session_costs"
+current_month=$(date +%Y-%m)
+
+mkdir -p "$COST_DIR"
+
+# Clean up old months (runs once per month)
+CLEANUP_MARKER="$COST_DIR/.cleaned_${current_month}"
+if [ ! -f "$CLEANUP_MARKER" ]; then
+    for f in "$COST_DIR"/[0-9][0-9][0-9][0-9]-[0-9][0-9]_*; do
+        [ -f "$f" ] || continue
+        file_name=$(basename "$f")
+        file_month=${file_name%%_*}
+        [ "$file_month" != "$current_month" ] && rm -f "$f"
+    done
+    touch "$CLEANUP_MARKER"
 fi
 
-# Calculate context usage percentage from current_usage fields
-if [[ "$USAGE" != "null" ]]; then
-    CTX_USED=$(echo "$USAGE" | jq '(.input_tokens // 0) + (.cache_creation_input_tokens // 0) + (.cache_read_input_tokens // 0)')
+# Write current session's cost to a per-session file (keyed by sanitized session_id)
+safe_session_id=$(printf '%s' "$session_id" | tr -c 'A-Za-z0-9._-' '_')
+if [ -n "$safe_session_id" ]; then
+    echo "$session_cost" > "$COST_DIR/${current_month}_${safe_session_id}"
 else
-    CTX_USED=0
+    echo "$session_cost" > "$COST_DIR/${current_month}_${PPID}"
 fi
 
-if [[ "$CTX_SIZE" -gt 0 && "$CTX_USED" -gt 0 ]]; then
-    CTX_PCT=$(echo "scale=1; $CTX_USED * 100 / $CTX_SIZE" | bc)
+# Sum all session cost files for the current month
+files=("$COST_DIR/${current_month}_"*)
+if [ -e "${files[0]}" ]; then
+    monthly_cost=$(awk 'BEGIN{t=0}{t+=$1}END{printf "%.4f",t}' "${files[@]}")
 else
-    CTX_PCT="0"
+    monthly_cost="0.0000"
+fi
+# ANSI foreground colors
+BOLD="\033[1m"
+DIM="\033[2m"
+GREEN="\033[32m"
+YELLOW="\033[33m"
+CYAN="\033[36m"
+MAGENTA="\033[35m"
+RED="\033[31m"
+RESET="\033[0m"
+
+# Build status line
+output=""
+
+# Current directory
+dir_name=$(basename "$cwd")
+safe_dir_name=$(sanitize_for_terminal "$dir_name")
+output+=$(printf "${GREEN}%s${RESET}" "$safe_dir_name")
+
+# Git branch if in git repo
+if git -C "$cwd" rev-parse --git-dir > /dev/null 2>&1; then
+    branch=$(git -C "$cwd" --no-optional-locks branch --show-current 2>/dev/null || echo "detached")
+    safe_branch=$(sanitize_for_terminal "$branch")
+    output+=$(printf " ${DIM}│${RESET} ${CYAN}%s${RESET}" "$safe_branch")
 fi
 
-# Choose context color based on usage percentage
-CTX_PCT_INT=${CTX_PCT%.*}
-CTX_PCT_INT=${CTX_PCT_INT:-0}
-if [[ "$CTX_PCT_INT" -ge 90 ]]; then
-    CTX_COLOR="$CTX_RED"
-elif [[ "$CTX_PCT_INT" -ge 75 ]]; then
-    CTX_COLOR="$CTX_PEACH"
-elif [[ "$CTX_PCT_INT" -ge 50 ]]; then
-    CTX_COLOR="$CTX_YELLOW"
-else
-    CTX_COLOR="$CTX_GREEN"
+# Model info
+safe_model=$(sanitize_for_terminal "$model")
+output+=$(printf " ${DIM}│${RESET} ${YELLOW}%s${RESET}" "$safe_model")
+
+# Context used (color-coded by usage)
+if [ -n "$used" ]; then
+    used_int=${used%.*}
+    if [ "$used_int" -lt 50 ] 2>/dev/null; then
+        ctx_color="$GREEN"
+    elif [ "$used_int" -lt 80 ] 2>/dev/null; then
+        ctx_color="$YELLOW"
+    else
+        ctx_color="$RED"
+    fi
+    safe_used=$(sanitize_for_terminal "$used")
+    output+=$(printf " ${DIM}│${RESET} ${ctx_color}%s%% used${RESET}" "$safe_used")
 fi
 
-# Build base output
-OUTPUT="${RESET}[${MODEL_COLOR}${MODEL_DISPLAY}${RESET}] in ${DIR_COLOR}${CURRENT_DIR}${RESET}"
+# Cost: session | monthly total
+output+=$(printf " ${DIM}│${RESET} ${MAGENTA}\$%.2f${RESET}${DIM}/${RESET}${BOLD}\033[38;5;246m\$%.2f${RESET}" "$session_cost" "$monthly_cost")
 
-# Append cost and context: "for $X.XX at YY% context"
-if [[ -n "$COST" && "$COST" != "null" && $(echo "$COST > 0" | bc) -eq 1 ]]; then
-    COST_FORMATTED=$(printf "%.2f" "$COST")
-    OUTPUT="${OUTPUT} for \$${COST_COLOR}${COST_FORMATTED}${RESET} at ${CTX_COLOR}${CTX_PCT}%${RESET} context"
-else
-    OUTPUT="${OUTPUT} at ${CTX_COLOR}${CTX_PCT}%${RESET} context"
+# Output style (if not default)
+if [ -n "$output_style" ] && [ "$output_style" != "default" ]; then
+    safe_output_style=$(sanitize_for_terminal "$output_style")
+    output+=$(printf " ${DIM}│${RESET} ${CYAN}%s${RESET}" "$safe_output_style")
 fi
 
-echo -e "$OUTPUT"
+printf "%s" "$output"
