@@ -49,12 +49,16 @@ attach() {
     # Create a grouped session so each terminal gets its own independent view
     # destroy-unattached cleans up the view on detach, SSH drop, or terminal close
     local view="view-$RANDOM"
+    # iTerm2 control mode: render each tmux window as a native iTerm2 tab.
+    # Requires LC_TERMINAL forwarded via SSH (SendEnv on Mac, AcceptEnv on remote).
+    local -a tmux_args=()
+    [ "${LC_TERMINAL:-}" = "iTerm2" ] && tmux_args=(-CC)
     if [ -n "$win" ]; then
-        tmux new-session -t "$sess" -s "$view" \; \
+        tmux "${tmux_args[@]}" new-session -t "$sess" -s "$view" \; \
             set-option destroy-unattached on \; \
             select-window -t "$win"
     else
-        tmux new-session -t "$sess" -s "$view" \; \
+        tmux "${tmux_args[@]}" new-session -t "$sess" -s "$view" \; \
             set-option destroy-unattached on
     fi
 }

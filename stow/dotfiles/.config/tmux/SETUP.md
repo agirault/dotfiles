@@ -16,6 +16,7 @@ Tmux is used to manage persistent terminal sessions on remote Linux boxes, acces
 - **Reload config:** `Ctrl-a r`
 - **Clipboard:** OSC 52 enabled - mouse selections in tmux copy to Mac clipboard (requires iTerm2 setting below)
 - **Notifications:** `allow-passthrough` lets OSC 9 escape sequences reach iTerm2 through SSH+tmux. `monitor-bell` + `bell-action any` highlights windows with bell activity in the status bar.
+- **Focus events:** `focus-events on` forwards terminal focus-gained/lost events to programs inside tmux, so apps can tell whether a pane is actually being watched.
 
 
 ## Mac-side setup (iTerm2)
@@ -29,6 +30,13 @@ These are one-time settings on the Mac - not on the remote box.
 2. **Notifications:** Preferences > Profiles > Terminal > enable **"Notification Center Alerts"**, then click **"Filter Alerts"** and check **"Send escape sequence-generated alerts"**
    - Also ensure iTerm2 has notification permissions in **System Settings > Notifications**
    - Any program that sends an OSC 9 escape sequence will trigger a macOS notification
+
+3. **Native tabs for tmux windows (`tmux -CC`):** iTerm2 can render each tmux window as a native iTerm2 tab. The `cw` script enables this automatically when it detects `LC_TERMINAL=iTerm2`.
+   - **Requires SSH env forwarding**, otherwise `LC_TERMINAL` isn't visible on the remote box:
+     - Mac `~/.ssh/config`: `SendEnv LC_TERMINAL LC_TERMINAL_VERSION`
+     - Linux `/etc/ssh/sshd_config`: `AcceptEnv LC_TERMINAL LC_TERMINAL_VERSION` (needs root + `sudo systemctl restart ssh`)
+   - Without forwarding, `cw` silently falls back to regular tmux attach - everything still works.
+   - In `-CC` mode: mouse/scrollback are handled natively by iTerm2 (scrollback is per-tab, not tmux's buffer). SSH drop closes the native tabs but the tmux session keeps running - just reattach.
 
 ## Reinstalling from scratch
 
