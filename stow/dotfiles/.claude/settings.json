@@ -5,12 +5,6 @@
     ]
   },
   "model": "opus[1m]",
-  "statusLine": {
-    "type": "command",
-    "command": "~/.claude/executable_statusline.sh"
-  },
-  "effortLevel": "medium",
-  "autoMemoryDirectory": "~/.claude/memory",
   "hooks": {
     "SessionEnd": [
       {
@@ -30,5 +24,28 @@
         ]
       }
     ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/executable_statusline.sh"
+  },
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "allowUnsandboxedCommands": false,
+    "network": {
+      "allowAllUnixSockets": true
+    },
+    "filesystem": {
+      "allowRead": ["~/"]
+    }
+  },
+  "env": {
+    "GIT_CONFIG_GLOBAL": "~/.gitconfig.local"
+  },
+  "effortLevel": "high",
+  "autoMemoryDirectory": "~/.claude/memory",
+  "enabledPlugins": {
+    "slack@claude-plugins-official": true
   }
 }
