@@ -22,6 +22,11 @@ fi
 read -p "[Git] Full Name: " fullname
 read -p "[Git] Email: " email
 
+# Unlock existing config if it was made immutable by a previous run, so we can rewrite it
+if [[ -f "$local_config" ]] && command -v chattr >/dev/null 2>&1; then
+    sudo chattr -i "$local_config" 2>/dev/null || true
+fi
+
 # Write .gitconfig.local
 cat > "$local_config" <<EOF
 [user]
@@ -78,6 +83,17 @@ if command -v glab >/dev/null 2>&1; then
     if [[ -n "$gitlab_host" ]]; then
         glab config set host "$gitlab_host"
         echo "    glab: default host set to $gitlab_host."
+    fi
+fi
+
+# Lock identity file against tampering (e.g. from a compromised sandboxed agent).
+# chmod 444 blocks accidental writes; chattr +i blocks even the owner without sudo.
+chmod 444 "$local_config"
+if command -v chattr >/dev/null 2>&1; then
+    if sudo chattr +i "$local_config" 2>/dev/null; then
+        echo "    $local_config locked (chmod 444 + immutable). To edit: sudo chattr -i '$local_config' && chmod u+w '$local_config'"
+    else
+        echo "    note: chmod 444 applied, but immutable flag needs sudo - re-run with sudo available for full protection"
     fi
 fi
 
