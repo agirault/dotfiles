@@ -1,4 +1,7 @@
 {
+  "env": {
+    "GIT_CONFIG_GLOBAL": "~/.gitconfig.local"
+  },
   "permissions": {
     "allow": [
       "Bash"
@@ -29,6 +32,10 @@
     "type": "command",
     "command": "~/.claude/executable_statusline.sh"
   },
+  "enabledPlugins": {
+    "slack@claude-plugins-official": true,
+    "skill-creator@claude-plugins-official": true
+  },
   "sandbox": {
     "enabled": true,
     "autoAllowBashIfSandboxed": true,
@@ -37,15 +44,11 @@
       "allowAllUnixSockets": true
     },
     "filesystem": {
-      "allowRead": ["~/"]
+      "allowRead": [
+        "~/"
+      ]
     }
   },
-  "env": {
-    "GIT_CONFIG_GLOBAL": "~/.gitconfig.local"
-  },
   "effortLevel": "high",
-  "autoMemoryDirectory": "~/.claude/memory",
-  "enabledPlugins": {
-    "slack@claude-plugins-official": true
-  }
+  "autoMemoryDirectory": "~/.claude/memory"
 }
