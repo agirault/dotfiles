@@ -108,7 +108,7 @@ Tests validate configs (symlinks, backups, content) and unlink (restore original
   - default window panes with claude & tig
 - **Claude CLI**:
   - `claude-cleanup` batch cleanup command (interactive bulk deletion)
-  - aliases: `claudes`/`cls` for `claude-sessions`, `claudec`/`clc` for `claude-cleanup`
+  - aliases: `claudec`/`clc` for `claude-cleanup`
 - **Claude skills**: `~/.claude/skills/` contains custom skills (e.g., weekly-report, unrewind) that would be useful across machines. Not yet stowed - needs review for internal/work-specific content before including in a public repo.
 - **Claude rules**: `~/.claude/rules/` (personal, use-case-specific rules) could also be stowed once reviewed.
 - **Docker test fixes**: Make `run_tests.sh` pass end-to-end in containers (see known issues below).
