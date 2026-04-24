@@ -31,7 +31,7 @@ cd ~/dotfiles
 | Package | Target | Contents |
 |---------|--------|----------|
 | `dotfiles` | `~/` | Git, fish, tmux, bash, claude configs, shared env and login script |
-| `tools` | `~/.local/bin/` | Standalone commands: `cw` (tmux workspaces), `claude-sessions` (session browser), `ssh-refresh-agent` |
+| `tools` | `~/.local/bin/` | Standalone commands: `tm` (tmux workspaces), `claude-sessions` (session browser), `ssh-refresh-agent` |
 
 ### What's in `dotfiles`
 
@@ -46,7 +46,7 @@ cd ~/dotfiles
 
 ### What's in `tools`
 
-- **`cw`**: tmux workspace manager. Run `cw --help` for usage.
+- **`tm`**: tmux workspace manager. Run `tm --help` for usage. Alias: `tml` (list).
 - **`claude-sessions`**: Cross-directory Claude Code session browser. Python curses TUI with:
   - Collapsible tree view grouped by directory, with search/filter bar and match highlighting
   - Live preview pane showing conversation history (navigable with arrow keys or mouse scroll)
@@ -96,6 +96,19 @@ Tests validate configs (symlinks, backups, content) and unlink (restore original
 
 ## Future work
 
+- **GPG signing**
+  - change default agent lock timing
+  - util/tool for unlocking
+  - sharing key safely across systems with this repo (see git-crypt & git-secret)
+- password mngmt
+  - see https://medium.com/@chasinglogic/the-definitive-guide-to-password-store-c337a8f023a1 ?
+- **alias**
+  - understand whether it works for commands with multiple components
+- **tm**:
+  - default window panes with claude & tig
+- **Claude CLI**:
+  - `claude-cleanup` batch cleanup command (interactive bulk deletion)
+  - aliases: `claudes`/`cls` for `claude-sessions`, `claudec`/`clc` for `claude-cleanup`
 - **Claude skills**: `~/.claude/skills/` contains custom skills (e.g., weekly-report, unrewind) that would be useful across machines. Not yet stowed - needs review for internal/work-specific content before including in a public repo.
 - **Claude rules**: `~/.claude/rules/` (personal, use-case-specific rules) could also be stowed once reviewed.
 - **Docker test fixes**: Make `run_tests.sh` pass end-to-end in containers (see known issues below).

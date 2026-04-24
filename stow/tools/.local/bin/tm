@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# tm - tmux workspace wrapper (custom, not a real tmux command)
+#
+# Usage:
+#   tm              attach to the session (creates it with a default window
+#                   if missing); no-op if already inside tmux
+#   tm <name>       create-or-switch to window <name>; attaches from outside
+#   tm -l|--list    list the session, its windows, and attached views
+#   tm -h|--help    show this help
+#
+# Model: a single "work" session holds every window (workspace). Each new
+# window starts with two side-by-side panes. Attaching from outside tmux
+# creates a grouped "view-*" session so each terminal gets an independent
+# focus while sharing the window list - different workspaces on different
+# monitors. Views are auto-destroyed on detach via destroy-unattached.
+#
+# iTerm2 control mode (-CC) is enabled when LC_TERMINAL=iTerm2 is set,
+# rendering each tmux window as a native iTerm2 tab. Note: in -CC mode,
+# iTerm2 picks the initially-focused tab on its own; `tm <name>` from
+# outside tmux can't reliably force focus onto an already-existing window.
+# Switch tabs in iTerm2 directly, or use `tm <name>` once inside tmux.
+#
+# Quick reference (inside tmux, prefix = Ctrl-a):
+#   prefix n / p / <number>   switch windows
+#   prefix w                  interactive window picker
+#   prefix ,                  rename window
+#   prefix &                  kill window
+#   prefix d                  detach (keep alive)
+#   prefix \                  split vertical
+#   prefix -                  split horizontal
+#   Alt+arrow                 move between panes
+#
+# Dependencies: tmux
+
+set -euo pipefail
+
+SESSION="work"
+
+is_cc() { [ "${LC_TERMINAL:-}" = "iTerm2" ]; }
+session_exists() { tmux has-session -t "$SESSION" 2>/dev/null; }
+window_exists() {
+    session_exists && tmux list-windows -t "$SESSION" -F '#{window_name}' \
+        2>/dev/null | grep -qx "$1"
+}
+
+# Create a new window with the two-pane layout.
+make_window() {
+    local name=$1 dir=$2
+    tmux new-window -t "$SESSION" -n "$name" -c "$dir"
+    tmux split-window -h -t "$SESSION:$name" -c "$dir"
+    tmux select-pane -L -t "$SESSION:$name"
+}
+
+# Bootstrap the primary session with its first window.
+make_session() {
+    local name=$1 dir=$2
+    tmux new-session -d -s "$SESSION" -n "$name" -c "$dir"
+    tmux split-window -h -t "$SESSION:$name" -c "$dir"
+    tmux select-pane -L -t "$SESSION:$name"
+}
+
+# Attach as a grouped view. destroy-unattached cleans up on detach; set in
+# the chain so the client is bound before the option's check runs.
+attach() {
+    local view="view-$RANDOM"
+    local -a args=()
+    is_cc && args=(-CC)
+    tmux "${args[@]}" new-session -t "$SESSION" -s "$view" \; \
+        set-option destroy-unattached on
+}
+
+switch_or_create() {
+    local name=$1 dir=${2:-$(pwd)}
+    if ! session_exists; then
+        make_session "$name" "$dir"
+    elif ! window_exists "$name"; then
+        make_window "$name" "$dir"
+    fi
+    if [ -n "${TMUX:-}" ]; then
+        tmux select-window -t "$name"
+    else
+        # Set work's current window before attach so the new view inherits it.
+        # Works reliably in non-CC mode; iTerm2 -CC may still default to its
+        # own pick, in which case switch tabs in iTerm2 directly after attach.
+        tmux select-window -t "$SESSION:$name"
+        attach
+    fi
+}
+
+cmd_help() { sed -n '2,/^[^#]/{ /^#/s/^# \?//p }' "$0"; }
+
+cmd_list() {
+    if ! session_exists; then
+        echo "no '$SESSION' session"
+        return 0
+    fi
+    local win_count
+    win_count=$(tmux list-windows -t "$SESSION" -F '.' | wc -l | tr -d ' ')
+    echo "$SESSION ($win_count windows)"
+    echo "├─ windows:"
+    tmux list-windows -t "$SESSION" \
+        -F '│    #{window_index}: #{window_name}#{?window_active, (active),}'
+
+    local views
+    views=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^view-' || true)
+    echo "└─ views:"
+    if [ -z "$views" ]; then
+        echo "     (none)"
+        return 0
+    fi
+    while IFS= read -r v; do
+        local state focus
+        state=$(tmux display-message -p -t "$v" '#{?session_attached,attached,detached}')
+        focus=$(tmux display-message -p -t "$v" '#{window_name}')
+        echo "     $v ($state -> $focus)"
+    done <<< "$views"
+}
+
+case "${1:-}" in
+    -h|--help) cmd_help; exit 0 ;;
+    -l|--list) cmd_list; exit 0 ;;
+    "")
+        if [ -n "${TMUX:-}" ]; then
+            echo "already in tmux (session: $(tmux display-message -p '#{session_name}'))"
+            exit 0
+        fi
+        session_exists || make_session "$(basename "$(pwd)")" "$(pwd)"
+        attach
+        ;;
+    -*)
+        echo "tm: unknown option: $1" >&2
+        exit 2
+        ;;
+    *)
+        # Join all positional args so `tm my workspace` works without quoting.
+        switch_or_create "$*"
+        ;;
+esac

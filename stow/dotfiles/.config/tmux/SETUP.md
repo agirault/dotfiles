@@ -31,12 +31,18 @@ These are one-time settings on the Mac - not on the remote box.
    - Also ensure iTerm2 has notification permissions in **System Settings > Notifications**
    - Any program that sends an OSC 9 escape sequence will trigger a macOS notification
 
-3. **Native tabs for tmux windows (`tmux -CC`):** iTerm2 can render each tmux window as a native iTerm2 tab. The `cw` script enables this automatically when it detects `LC_TERMINAL=iTerm2`.
+3. **Native tabs for tmux windows (`tmux -CC`):** iTerm2 can render each tmux window as a native iTerm2 tab. The `tm` script enables this automatically when it detects `LC_TERMINAL=iTerm2`.
    - **Requires SSH env forwarding**, otherwise `LC_TERMINAL` isn't visible on the remote box:
      - Mac `~/.ssh/config`: `SendEnv LC_TERMINAL LC_TERMINAL_VERSION`
      - Linux `/etc/ssh/sshd_config`: `AcceptEnv LC_TERMINAL LC_TERMINAL_VERSION` (needs root + `sudo systemctl restart ssh`)
-   - Without forwarding, `cw` silently falls back to regular tmux attach - everything still works.
+   - Without forwarding, `tm` silently falls back to regular tmux attach - everything still works.
    - In `-CC` mode: mouse/scrollback are handled natively by iTerm2 (scrollback is per-tab, not tmux's buffer). SSH drop closes the native tabs but the tmux session keeps running - just reattach.
+
+4. **Tab titles track tmux window names (`tmux -CC`):** out of the box, iTerm2 shows the foreground job or cwd in the tab bar instead of the tmux window name. To fix, create a dedicated profile for tmux:
+   - Preferences > General > tmux > check **"Use tmux profile rather than profile of the connecting session"**, and pick a profile (e.g. `tmux`).
+   - In that profile, under **General > Title**: the built-in Title dropdown doesn't expose the tmux window name, but the **Subtitle** field accepts interpolated strings. Set it to `\(tab.tmuxWindowName)`.
+   - Under **Terminal**: uncheck **"Applications in terminal may change the window name"** so shell prompt escapes (OSC 0/2) can't overwrite the Name.
+   - Tmux-side `allow-rename off` + `automatic-rename off` (already in `.tmux.conf`) keep the window name stable once `tm` sets it.
 
 ## Reinstalling from scratch
 

@@ -35,7 +35,7 @@ if [[ "$phase" == "configs" ]]; then
     check ".config/env/env.conf is a symlink" test -L "$HOME/.config/env/env.conf"
     check ".config/env/pre_env.sh is a symlink" test -L "$HOME/.config/env/pre_env.sh"
     check ".config/env/post_env.sh is a symlink" test -L "$HOME/.config/env/post_env.sh"
-    check ".local/bin/cw is a symlink" test -L "$HOME/.local/bin/cw"
+    check ".local/bin/tm is a symlink" test -L "$HOME/.local/bin/tm"
     check ".local/bin/ssh-refresh-agent is a symlink" test -L "$HOME/.local/bin/ssh-refresh-agent"
 
     # Backups created for pre-existing files
@@ -51,7 +51,7 @@ if [[ "$phase" == "configs" ]]; then
     check ".gitconfig has NO [user] section" ! grep -q '^\[user\]' "$HOME/.gitconfig"
     check ".claude/settings.json uses ~ not /home/" ! grep -q '/home/' "$HOME/.claude/settings.json"
     check ".bashrc sources .bashrc.d" grep -q 'bashrc.d' "$HOME/.bashrc"
-    check "cw is executable" test -x "$HOME/.local/bin/cw"
+    check "tm is executable" test -x "$HOME/.local/bin/tm"
 
     # Commands available
     echo "-- Commands --"
