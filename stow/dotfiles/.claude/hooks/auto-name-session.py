@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""SessionEnd hook that auto-names unnamed sessions using Claude haiku.
+"""Stop hook that auto-names unnamed sessions using Claude haiku.
 
-Skips sessions that already have a title, were deleted by cleanup, or
-have <= 1 useful user message. On failure, does nothing.
+Fires after every assistant turn. Skips sessions that already have a title
+or have <= 1 useful user message. A sibling lockfile held via flock prevents
+concurrent runs (e.g. rapid back-to-back stops) from appending duplicate
+titles; the kernel releases the lock on process exit so a crash can't wedge
+naming.
 
-Reads hook input JSON from stdin. Runs async so it never blocks exit.
+Reads hook input JSON from stdin. Runs async so it never blocks.
 """
 
+import fcntl
 import json
 import os
 import sys
@@ -29,7 +33,12 @@ def main():
     if len(sessions.get_user_messages(jsonl_path)) <= 1:
         return
 
-    sessions.auto_name(jsonl_path, session_id)
+    with open(jsonl_path + ".naming.lock", "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        sessions.auto_name(jsonl_path, session_id)
 
 
 if __name__ == "__main__":

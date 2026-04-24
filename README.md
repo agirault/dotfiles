@@ -38,15 +38,16 @@ cd ~/dotfiles
 - **Git**: aliases, delta pager, difftastic, rebase settings. Identity via `[include]` from `~/.gitconfig.local`
 - **Fish**: shell config, shared env loader
 - **Tmux**: Ctrl-a prefix, mouse, splits, OSC52 clipboard, bell notifications
-- **Claude**: Claude Code settings, Catppuccin status line, global agent instructions (CLAUDE.md), SessionEnd hooks:
-  - `auto-cleanup-session.py` - deletes trivially empty sessions on exit
-  - `auto-name-session.py` - generates titles for unnamed sessions via Claude haiku
+- **Claude**: Claude Code settings, Catppuccin status line, global agent instructions (CLAUDE.md), hooks:
+  - `auto-cleanup-session.py` (SessionEnd) - deletes trivially empty sessions on exit
+  - `auto-name-session.py` (Stop) - generates titles for unnamed sessions via Claude haiku after the 2nd assistant turn; lockfile-guarded against races. Runs early so `claude --resume <title>` / tab completion work before you exit.
 - **Bash**: `.bashrc.d/` snippets for env loading and login script sourcing
 - **Shared env** (`~/.config/env/`): `env.conf` and `login.sh` used by both bash and fish (see below)
 
 ### What's in `tools`
 
 - **`tm`**: tmux workspace manager. Run `tm --help` for usage. Alias: `tml` (list).
+- **`claude-session-completions`**: Fast (~20ms) tab-completion source for `claude --resume` / `clr`. Emits session titles (or UUIDs when untitled) with relative time + first-user-msg as the description. Scoped to cwd's project dir by default; pass `--all` for every project. Wired up via `stow/dotfiles/.config/fish/completions/{claude,clr}.fish`.
 - **`claude-sessions`**: Cross-directory Claude Code session browser. Python curses TUI with:
   - Collapsible tree view grouped by directory, with search/filter bar and match highlighting
   - Live preview pane showing conversation history (navigable with arrow keys or mouse scroll)

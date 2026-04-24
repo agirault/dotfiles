@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Print shell-completion candidates for `claude --resume`.
+
+Output: one TAB-separated line per session: `COMPLETION\tDESCRIPTION`.
+
+- `COMPLETION` is the session title when set and unique (claude --resume
+  accepts titles). Falls back to the UUID when the session is untitled or
+  its title collides with a newer session.
+- `DESCRIPTION` is a short hint (relative time + fallback info).
+
+Scope: the `~/.claude/projects/<encoded-cwd>/` dir for the current working
+directory. Pass `--all` to scan all project dirs.
+
+Sessions are sorted newest first by file mtime. When titles collide, the
+newest session keeps the title; older ones fall back to the UUID.
+"""
+
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from glob import glob
+
+PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
+MAX_HEAD_LINES = 40  # lines scanned for a first-user-message fallback
+
+
+def encode_cwd(path: str) -> str:
+    return path.replace("/", "-")
+
+
+def relative_time(mtime: float) -> str:
+    delta = datetime.now(timezone.utc) - datetime.fromtimestamp(mtime, tz=timezone.utc)
+    s = int(delta.total_seconds())
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h"
+    days = s // 86400
+    if days < 30:
+        return f"{days}d"
+    if days < 365:
+        return f"{days // 30}mo"
+    return f"{days // 365}y"
+
+
+def extract_user_text(entry: dict) -> str:
+    msg = entry.get("message")
+    if not isinstance(msg, dict):
+        return ""
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "text":
+                parts.append(c.get("text", ""))
+        return " ".join(parts).strip()
+    return ""
+
+
+WRAPPER_RE = re.compile(r"^<[a-zA-Z][\w-]*[^>]*>")
+
+
+def scan_session(jsonl_path: str) -> tuple[str | None, str]:
+    """Return (custom_title_or_None, first_user_message)."""
+    custom_title = None
+    first_user = ""
+    header_user_checked = 0
+    try:
+        with open(jsonl_path, "rb") as f:
+            for raw in f:
+                has_title = b'"type":"custom-title"' in raw
+                need_user = (
+                    not first_user
+                    and header_user_checked < MAX_HEAD_LINES
+                    and b'"type":"user"' in raw
+                )
+                if not has_title and not need_user:
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                t = entry.get("type")
+                if t == "custom-title":
+                    title = entry.get("customTitle")
+                    if title:
+                        custom_title = title
+                elif t == "user" and not first_user:
+                    header_user_checked += 1
+                    text = extract_user_text(entry)
+                    # Strip any leading <wrapper> tags (system-reminder,
+                    # local-command-*, command-*, etc.) and their content.
+                    while text and text.startswith("<"):
+                        m = WRAPPER_RE.match(text)
+                        if not m:
+                            break
+                        tag = m.group(0)
+                        name = re.match(r"<([a-zA-Z][\w-]*)", tag).group(1)
+                        close = f"</{name}>"
+                        end = text.find(close)
+                        if end != -1:
+                            text = text[end + len(close):].lstrip()
+                        else:
+                            text = text[m.end():].lstrip()
+                    if text:
+                        first_user = text
+    except OSError:
+        return None, ""
+    return custom_title, first_user
+
+
+def main() -> None:
+    scope_all = "--all" in sys.argv
+
+    if scope_all:
+        project_dirs = sorted(glob(os.path.join(PROJECTS_DIR, "*")))
+    else:
+        project_dirs = [os.path.join(PROJECTS_DIR, encode_cwd(os.getcwd()))]
+
+    sessions = []
+    for pd in project_dirs:
+        if not os.path.isdir(pd):
+            continue
+        for jsonl_path in glob(os.path.join(pd, "*.jsonl")):
+            try:
+                mtime = os.path.getmtime(jsonl_path)
+            except OSError:
+                continue
+            sessions.append((mtime, jsonl_path))
+    sessions.sort(reverse=True)
+
+    seen_titles: set[str] = set()
+    lines: list[str] = []
+    for mtime, jsonl_path in sessions:
+        sid = os.path.splitext(os.path.basename(jsonl_path))[0]
+        title, first_user = scan_session(jsonl_path)
+        age = relative_time(mtime)
+
+        use_title = bool(title) and title not in seen_titles
+        if title:
+            seen_titles.add(title)
+
+        if use_title:
+            completion = title
+            hint = first_user or sid[:8]
+            if len(hint) > 50:
+                hint = hint[:47] + "..."
+            description = f"{age}  {hint}"
+        else:
+            completion = sid
+            if title:
+                description = f"{age}  {title}  (dup title)"
+            else:
+                hint = first_user or "(empty)"
+                if len(hint) > 60:
+                    hint = hint[:57] + "..."
+                description = f"{age}  {hint}"
+
+        completion = completion.replace("\t", " ").replace("\n", " ")
+        description = description.replace("\t", " ").replace("\n", " ")
+        lines.append(f"{completion}\t{description}")
+
+    sys.stdout.write("\n".join(lines))
+    if lines:
+        sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    main()

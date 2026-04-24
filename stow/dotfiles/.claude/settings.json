@@ -20,7 +20,13 @@
             "command": "~/.claude/hooks/auto-cleanup-session.py",
             "timeout": 5,
             "async": true
-          },
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
           {
             "type": "command",
             "command": "~/.claude/hooks/auto-name-session.py",
