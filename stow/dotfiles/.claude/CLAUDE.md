@@ -6,7 +6,11 @@
 
 ## Shell
 
-My interactive shell is fish, when providing commands for me to run, use the fix syntax if the POSIX alternative isn't compatible. Do stick to Bash for shell scripts.
+My interactive shell is fish, when providing commands for me to run, use the fish syntax if the POSIX alternative isn't compatible. Do stick to Bash for shell scripts.
+
+**No `python3 -c`, inline `jq '...'` with `!`, or `bash -c` with non-trivial quoting.** Claude Code's Bash tool escapes `!` to `\!` in all quoting styles (anthropics/claude-code [#23740](https://github.com/anthropics/claude-code/issues/23740)). `$` and backticks are similarly unsafe.
+
+Instead: Write a script to `$TMPDIR/name.py`, run `python3 $TMPDIR/name.py`.
 
 ## Git
 
