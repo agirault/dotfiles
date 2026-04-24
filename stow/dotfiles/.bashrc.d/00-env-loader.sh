@@ -37,6 +37,12 @@ if [ -r "$conf" ]; then
             export)
                 eval export "$key=\"$val\""
                 ;;
+            default)
+                # Only set if unset or empty (matches ${VAR:-val} semantics)
+                if [ -z "${!key}" ]; then
+                    eval export "$key=\"$val\""
+                fi
+                ;;
             alias)
                 alias "$key=$val"
                 ;;

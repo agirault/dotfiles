@@ -64,7 +64,7 @@ Manual command to fix SSH agent in stale tmux sessions. Run `ssh-refresh-agent` 
 
 INI-style config parsed by shell-specific loaders (`env_loader.fish` for fish, `00-env-loader.sh` for bash). Each loader reads the same file but uses native shell APIs to apply it. Changes take effect in the current shell process.
 
-Sections: `[prepend]` (prepend to a variable, supports multiple entries), `[export]` (set and export, supports command substitution), `[alias]` (shell aliases). All use `KEY=value` format. See the file itself for current values.
+Sections: `[prepend]` (prepend to a variable, supports multiple entries), `[export]` (set and export, supports command substitution), `[default]` (export only if unset or empty - honors parent env), `[alias]` (shell aliases). All use `KEY=value` format. See the file itself for current values.
 
 ### `pre_env.sh` / `post_env.sh` - startup hooks
 

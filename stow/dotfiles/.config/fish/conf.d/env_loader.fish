@@ -37,6 +37,11 @@ if test -r "$conf"
                 end
             case export
                 set -gx $key $val
+            case default
+                # Only set if unset or empty (matches ${VAR:-val} semantics)
+                if not set -q $key; or test -z "$$key"
+                    set -gx $key $val
+                end
             case alias
                 alias $key $val
         end
