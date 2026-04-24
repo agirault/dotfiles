@@ -34,6 +34,8 @@ setup_apt_list "vscode" "https://packages.microsoft.com" \
     "keys/microsoft.asc" "repos/code stable main"
 setup_apt_list "docker" "https://download.docker.com" \
     "linux/ubuntu/gpg" "linux/ubuntu $rel stable"
+setup_apt_list "nodesource" "https://deb.nodesource.com" \
+    "gpgkey/nodesource-repo.gpg.key" "node_22.x nodistro main"
 
 sudo apt-add-repository -n ppa:fish-shell/release-3 -y 2>/dev/null || true
 
@@ -50,7 +52,8 @@ sudo apt-get install -y \
     apt-rdepends \
     git-gui git-delta tig gh \
     build-essential libtool m4 automake \
-    ca-certificates gnupg gnupg2 pass pinentry-tty
+    ca-certificates gnupg gnupg2 pass pinentry-tty \
+    nodejs
 
 # Binary-installed tools
 # Note: glab from snap has permission issues, from apt is too old
@@ -65,5 +68,6 @@ command -v dust >/dev/null 2>&1 || \
     (curl -sSfL https://raw.githubusercontent.com/bootandy/dust/refs/heads/master/install.sh | bash)
 command -v curlie >/dev/null 2>&1 || \
     (curl -sSfL https://webinstall.dev/curlie | bash)
+command -v codex >/dev/null 2>&1 || sudo npm install -g @openai/codex
 
 echo "==> Packages installed."
