@@ -50,6 +50,7 @@ stow_targets() {
 # ---- Phase: packages ----
 phase_packages() {
     bash "$SETUP_DIR/packages.sh"
+    bash "$SETUP_DIR/sandbox.sh"
     bash "$SETUP_DIR/fisher-plugins.sh"
     if [[ "$NO_DOCKER" == true ]]; then
         echo "==> Skipping Docker setup (--no-docker)."
