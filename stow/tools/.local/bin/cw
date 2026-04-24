@@ -41,7 +41,7 @@ create_window() {
     local sess=$1 name=$2 dir=$3
     tmux new-window -t "$sess" -n "$name" -c "$dir"
     tmux split-window -h -t "$sess:$name" -c "$dir"
-    tmux select-pane -t "$sess:$name.0"
+    tmux select-pane -L -t "$sess:$name"
 }
 
 attach() {
@@ -68,7 +68,7 @@ ensure_session() {
     if ! tmux has-session -t "$sess" 2>/dev/null; then
         tmux new-session -d -s "$sess" -n "$name" -c "$dir"
         tmux split-window -h -t "$sess:$name" -c "$dir"
-        tmux select-pane -t "$sess:$name.0"
+        tmux select-pane -L -t "$sess:$name"
         return 0
     fi
     return 1
