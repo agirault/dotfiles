@@ -1,7 +1,4 @@
 {
-  "env": {
-    "GIT_CONFIG_GLOBAL": "~/.gitconfig.local"
-  },
   "permissions": {
     "allow": [
       "Bash"
