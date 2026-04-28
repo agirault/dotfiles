@@ -10,7 +10,11 @@
       "NotebookEdit"
     ]
   },
-  "model": "opus[1m]",
+  "model": "claude-opus-4-6[1m]",
+  "env": {
+    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
+    "MAX_THINKING_TOKENS": "127999"
+  },
   "hooks": {
     "SessionEnd": [
       {
