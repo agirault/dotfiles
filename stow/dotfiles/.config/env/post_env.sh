@@ -7,4 +7,4 @@
 [ -t 1 ] || return 0 2>/dev/null || exit 0
 
 # Show system info
-command -v fastfetch >/dev/null 2>&1 && fastfetch
+command -v fastfetch >/dev/null 2>&1 && fastfetch --ds-force-drm sysfs-only
