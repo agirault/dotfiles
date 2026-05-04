@@ -1,4 +1,8 @@
 {
+  "env": {
+    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
+    "MAX_THINKING_TOKENS": "127999"
+  },
   "permissions": {
     "allow": [
       "Bash",
@@ -7,14 +11,11 @@
       "WebFetch",
       "WebSearch",
       "Agent",
+      "Monitor",
       "NotebookEdit"
     ]
   },
-  "model": "claude-opus-4-6[1m]",
-  "env": {
-    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
-    "MAX_THINKING_TOKENS": "127999"
-  },
+  "model": "opus[1m]",
   "hooks": {
     "SessionEnd": [
       {
@@ -47,7 +48,7 @@
   },
   "enabledPlugins": {
     "slack@claude-plugins-official": true,
-    "skill-creator@claude-plugins-official": false,
+    "skill-creator@claude-plugins-official": true,
     "superpowers@claude-plugins-official": false,
     "code-simplifier@claude-plugins-official": true,
     "code-review@claude-plugins-official": true,
@@ -79,8 +80,13 @@
       "allowAllUnixSockets": true
     },
     "filesystem": {
+      "allowWrite": [
+        "/home/agirault/",
+        "/tmp/"
+      ],
       "allowRead": [
-        "~/"
+        "/home/agirault/",
+        "/tmp/"
       ]
     }
   },
