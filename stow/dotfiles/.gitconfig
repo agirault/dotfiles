@@ -67,7 +67,7 @@
   cps = cherry-pick --skip
   cm = "!git commit --signoff --message \"$@\" && git status #"
   p = push origin HEAD
-  pf = p --force
+  pf = p --force-with-lease
   ch = checkout
   chb = checkout -b
   rs = reset
