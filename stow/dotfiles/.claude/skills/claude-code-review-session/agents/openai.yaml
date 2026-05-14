@@ -1,0 +1,4 @@
+interface:
+  display_name: "Claude Code Review Session"
+  short_description: "Persistent Claude Code review threads"
+  default_prompt: "Use $claude-code-review-session to get a persistent Claude Code review of my current changes."
