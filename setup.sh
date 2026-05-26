@@ -120,6 +120,8 @@ BASH
         echo "    Removed stale ~/AGENTS.md (now at ~/.claude/CLAUDE.md)"
     fi
 
+    bash "$SETUP_DIR/tmux-plugins.sh"
+
     echo "==> Configs set up."
 }
 

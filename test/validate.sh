@@ -10,10 +10,10 @@ check() {
     shift
     if "$@" >/dev/null 2>&1; then
         echo "  PASS: $desc"
-        ((PASS++))
+        ((++PASS))
     else
         echo "  FAIL: $desc"
-        ((FAIL++))
+        ((++FAIL))
     fi
 }
 
@@ -51,6 +51,12 @@ if [[ "$phase" == "configs" ]]; then
     check ".gitconfig has NO [user] section" ! grep -q '^\[user\]' "$HOME/.gitconfig"
     check ".claude/settings.json uses ~ not /home/" ! grep -q '/home/' "$HOME/.claude/settings.json"
     check ".bashrc sources .bashrc.d" grep -q 'bashrc.d' "$HOME/.bashrc"
+    check ".tmux.conf configures TPM" grep -q "tmux-plugins/tpm" "$HOME/.tmux.conf"
+    check ".tmux.conf configures tmux-resurrect" grep -q "tmux-plugins/tmux-resurrect" "$HOME/.tmux.conf"
+    check ".tmux.conf configures tmux-continuum" grep -q "tmux-plugins/tmux-continuum" "$HOME/.tmux.conf"
+    check ".tmux.conf enables continuum restore" grep -q "@continuum-restore 'on'" "$HOME/.tmux.conf"
+    check ".tmux.conf sets TPM plugin path" grep -q "TMUX_PLUGIN_MANAGER_PATH" "$HOME/.tmux.conf"
+    check "tmux plugin setup script has no syntax errors" bash -n "$HOME/dotfiles/setup/tmux-plugins.sh"
     check "tm is executable" test -x "$HOME/.local/bin/tm"
 
     # Commands available

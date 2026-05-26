@@ -37,7 +37,7 @@ cd ~/dotfiles
 
 - **Git**: aliases, delta pager, difftastic, rebase settings. Identity via `[include]` from `~/.gitconfig.local`
 - **Fish**: shell config, shared env loader
-- **Tmux**: Ctrl-a prefix, mouse, splits, OSC52 clipboard, bell notifications
+- **Tmux**: Ctrl-a prefix, mouse, splits, OSC52 clipboard, bell notifications, automatic session/window restore after reboot via tmux-resurrect and tmux-continuum
 - **Claude**: Claude Code settings, Catppuccin status line, global agent instructions (CLAUDE.md), hooks:
   - `auto-cleanup-session.py` (SessionEnd) - deletes trivially empty sessions on exit
   - `auto-name-session.py` (Stop) - generates titles for unnamed sessions via Claude haiku after the 2nd assistant turn; lockfile-guarded against races. Runs early so `claude --resume <title>` / tab completion work before you exit.
@@ -56,6 +56,17 @@ cd ~/dotfiles
   - Uses `claude_utils/index.py` to scan all `~/.claude/projects/` session files
 - **`ssh-refresh-agent`**:
 Manual command to fix SSH agent in stale tmux sessions. Run `ssh-refresh-agent` to find a live socket and update the symlink, or `ssh-refresh-agent --check` to test. Called automatically by `pre_env.sh` on shell startup.
+
+### Tmux restore
+
+Tmux plugins are installed under `~/.tmux/plugins/` by `./setup.sh configs` and `./setup.sh all`.
+
+- `tmux-resurrect` saves and restores sessions, windows, panes, layouts, and pane working directories.
+- `tmux-continuum` autosaves every 15 minutes by default and automatically restores the latest saved state when a new tmux server starts.
+- Manual save: prefix + `Ctrl-s`.
+- Manual restore: prefix + `Ctrl-r`.
+
+Pane scrollback capture is intentionally disabled so terminal contents are not persisted.
 
 ## Shared environment
 
