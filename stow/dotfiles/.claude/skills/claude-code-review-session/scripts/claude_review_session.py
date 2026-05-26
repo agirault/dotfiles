@@ -243,6 +243,70 @@ def tmux_window_name(key: str, round_index: int | None = None) -> str:
     return f"{base[:max_base_len].rstrip('-')}{suffix}"
 
 
+def review_queue_dir(paths: ReviewPaths) -> Path:
+    return paths.metadata.with_suffix(".queue")
+
+
+def request_queue_path(queue_dir: Path) -> Path:
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    return queue_dir / f"{time.time_ns()}-{os.getpid()}.json"
+
+
+def enqueue_request(queue_dir: Path, request: dict[str, Any]) -> Path:
+    request_path = request_queue_path(queue_dir)
+    atomic_write_json(request_path, request)
+    return request_path
+
+
+def queued_request_files(queue_dir: Path) -> list[Path]:
+    try:
+        return sorted(path for path in queue_dir.iterdir() if path.suffix == ".json" and path.is_file())
+    except FileNotFoundError:
+        return []
+
+
+def claim_queued_request(path: Path) -> Path | None:
+    claimed = path.with_name(f"{path.name}.claimed-{os.getpid()}")
+    try:
+        path.rename(claimed)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    return claimed
+
+
+def cleanup_request_queue(payload: dict[str, Any]) -> None:
+    queue_dir = payload.get("request_queue_dir")
+    if not queue_dir:
+        return
+    try:
+        paths = list(Path(str(queue_dir)).expanduser().iterdir())
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+    for path in paths:
+        if not path.is_file():
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def resolve_tmux_runner_idle_seconds(args: argparse.Namespace) -> int:
+    if args.tmux_runner_idle_seconds is not None:
+        return args.tmux_runner_idle_seconds
+    if args.tmux_keep_window:
+        return -1
+    value = os.environ.get("CLAUDE_REVIEW_TMUX_RUNNER_IDLE_SECONDS", "300")
+    try:
+        return int(value)
+    except ValueError:
+        return 300
+
+
 def resolve_background_launcher(requested: str) -> str:
     if requested == "auto":
         return "tmux" if shutil.which("tmux") else "subprocess"
@@ -354,6 +418,78 @@ def tmux_worker_command(
     else:
         script += "exit $status"
     return shell_join(["bash", "--noprofile", "--norc", "-lc", script])
+
+
+def tmux_runner_command(
+    queue_dir: Path,
+    key: str,
+    *,
+    idle_seconds: int,
+    manager_log: Path,
+    window_name: str,
+) -> str:
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "_runner",
+        "--queue-dir",
+        str(queue_dir.expanduser()),
+        "--key",
+        safe_key(key),
+        "--idle-seconds",
+        str(idle_seconds),
+        "--manager-log",
+        str(manager_log.expanduser()),
+        "--window-name",
+        window_name,
+    ]
+    return shell_join(cmd)
+
+
+def find_tmux_window(base_cmd: list[str], session_name: str, window_name: str) -> dict[str, str] | None:
+    windows = subprocess.run(
+        [
+            *base_cmd,
+            "list-windows",
+            "-t",
+            session_name,
+            "-F",
+            "#{window_id}\t#{window_name}",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if windows.returncode != 0:
+        return None
+    window_id = ""
+    for line in windows.stdout.splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) == 2 and parts[1] == window_name:
+            window_id = parts[0]
+            break
+    if not window_id:
+        return None
+
+    pane = subprocess.run(
+        [
+            *base_cmd,
+            "list-panes",
+            "-t",
+            window_id,
+            "-F",
+            "#{pane_id}\t#{pane_pid}\t#{pane_dead}",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if pane.returncode != 0:
+        return None
+    pane_id, pane_pid, pane_dead = (pane.stdout.strip().split("\t") + ["", "", ""])[:3]
+    if pane_dead == "1":
+        return None
+    return {"window_id": window_id, "pane_id": pane_id, "pane_pid": pane_pid}
 
 
 def tmux_window_alive(metadata: dict[str, Any]) -> bool | None:
@@ -666,6 +802,7 @@ def reconcile_status(paths: ReviewPaths, metadata: dict[str, Any]) -> dict[str, 
     stored_status = metadata.get("status")
     if status == "crashed" and stored_status not in TERMINAL_STATUSES:
         cleanup_request_file(payload)
+        cleanup_request_queue(payload)
         update_metadata(
             paths.metadata,
             status="crashed",
@@ -1164,7 +1301,8 @@ def build_start_parser() -> argparse.ArgumentParser:
     parser.add_argument("--background-launcher", choices=("auto", "subprocess", "tmux"), default="auto", help="How to launch background workers.")
     parser.add_argument("--tmux-session", default=os.environ.get("CLAUDE_REVIEW_TMUX_SESSION", "claude-review"), help="Normal tmux session used for review windows.")
     parser.add_argument("--tmux-socket-name", default=os.environ.get("CLAUDE_REVIEW_TMUX_SOCKET"), help="Optional dedicated tmux socket name. Omit to use the normal tmux server.")
-    parser.add_argument("--tmux-keep-window", action=argparse.BooleanOptionalAction, default=False, help="Keep tmux review windows open after completion so final output remains visible.")
+    parser.add_argument("--tmux-keep-window", action=argparse.BooleanOptionalAction, default=False, help="Keep the per-key tmux runner window open indefinitely after completion.")
+    parser.add_argument("--tmux-runner-idle-seconds", type=int, help="How long an idle per-key tmux runner window stays open after its queue drains. Default 300, 0 exits immediately, negative never exits.")
     parser.add_argument("--base", default="HEAD", help="Git ref used when capturing a diff.")
     parser.add_argument("--diff", action="store_true", help="Force including git status and diff.")
     parser.add_argument("--no-diff", action="store_true", help="Do not include git status or diff.")
@@ -1227,10 +1365,11 @@ def start_background(args: argparse.Namespace, cwd: Path, stdin_text: str, start
     request = {
         "argv": child_argv,
         "cwd": str(cwd),
+        "key": key,
         "round_index": round_index,
+        "store_dir": str(paths.metadata.parent),
         "stdin_text": stdin_text,
     }
-    atomic_write_json(paths.request, request)
     now = iso_now()
     update_metadata(
         paths.metadata,
@@ -1258,7 +1397,7 @@ def start_background(args: argparse.Namespace, cwd: Path, stdin_text: str, start
         stdout_log_path=str(paths.stdout_log),
         stderr_log_path=str(paths.stderr_log),
         stream_log_path=str(paths.stream_log),
-        request_path=str(paths.request),
+        request_path=None,
         include_diff=include_diff,
         streaming=args.stream,
         claude_event_count=0,
@@ -1267,10 +1406,26 @@ def start_background(args: argparse.Namespace, cwd: Path, stdin_text: str, start
         last_partial_text_at=None,
     )
     launcher = resolve_background_launcher(args.background_launcher)
-    worker_args = [sys.executable, str(Path(__file__).resolve()), "_worker", "--request-file", str(paths.request)]
     if launcher == "tmux":
         tmux_session_name = args.tmux_session
         manager_log = tmux_manager_log_path(paths.metadata.parent, tmux_session_name)
+        queue_dir = review_queue_dir(paths)
+        window_name = tmux_window_name(key)
+        runner_idle_seconds = resolve_tmux_runner_idle_seconds(args)
+        queued_request = dict(request)
+        queued_request.update(
+            {
+                "manager_log_path": str(manager_log),
+                "window_name": window_name,
+            }
+        )
+        request_path = enqueue_request(queue_dir, queued_request)
+        update_metadata(
+            paths.metadata,
+            request_path=str(request_path),
+            request_queue_dir=str(queue_dir),
+            tmux_runner_idle_seconds=runner_idle_seconds,
+        )
         append_manager_log(
             manager_log,
             "triggered",
@@ -1280,9 +1435,21 @@ def start_background(args: argparse.Namespace, cwd: Path, stdin_text: str, start
             stream=args.stream,
             keep_window=args.tmux_keep_window,
         )
+        append_manager_log(
+            manager_log,
+            "queued",
+            key=key,
+            request_path=request_path,
+            round_index=round_index,
+            window_name=window_name,
+        )
         if not shutil.which("tmux"):
             update_metadata(paths.metadata, status="failed", completed_at=iso_now(), error="tmux not found")
             append_manager_log(manager_log, "failed", key=key, reason="tmux-not-found")
+            try:
+                request_path.unlink()
+            except OSError:
+                pass
             print("tmux not found for --background-launcher tmux", file=sys.stderr)
             return 1
         base_cmd = tmux_base_cmd(args.tmux_socket_name)
@@ -1296,62 +1463,82 @@ def start_background(args: argparse.Namespace, cwd: Path, stdin_text: str, start
                 error=manager.stderr.strip(),
             )
             append_manager_log(manager_log, "failed", key=key, reason="ensure-tmux-session", exit_code=manager.returncode)
+            try:
+                request_path.unlink()
+            except OSError:
+                pass
             sys.stderr.write(manager.stderr)
             return manager.returncode or 1
 
-        window_name = tmux_window_name(key, round_index)
-        shell_cmd = tmux_worker_command(
-            worker_args,
-            paths,
-            key,
-            keep_window=args.tmux_keep_window,
-            manager_log=manager_log,
-            round_index=round_index,
-            window_name=window_name,
-        )
-        launch = subprocess.run(
-            [
-                *base_cmd,
-                "new-window",
-                "-d",
-                "-P",
-                "-F",
-                "#{window_id}\t#{pane_id}\t#{pane_pid}",
-                "-t",
-                f"{tmux_session_name}:",
-                "-n",
-                window_name,
-                "-c",
-                str(cwd),
-                shell_cmd,
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if launch.returncode != 0:
-            update_metadata(
-                paths.metadata,
-                status="failed",
-                completed_at=iso_now(),
-                exit_code=launch.returncode,
-                error=launch.stderr.strip(),
+        existing_window = find_tmux_window(base_cmd, tmux_session_name, window_name)
+        if existing_window:
+            window_id = existing_window.get("window_id") or ""
+            pane_id = existing_window.get("pane_id") or ""
+            pane_pid = existing_window.get("pane_pid") or ""
+            append_manager_log(
+                manager_log,
+                "reused",
+                key=key,
+                window_id=window_id or None,
+                window_name=window_name,
+                pane_id=pane_id or None,
             )
-            append_manager_log(manager_log, "failed", key=key, reason="new-window", exit_code=launch.returncode)
-            sys.stderr.write(launch.stderr)
-            return launch.returncode or 1
-        window_id, pane_id, pane_pid = (launch.stdout.strip().split("\t") + ["", "", ""])[:3]
+        else:
+            runner_cmd = tmux_runner_command(
+                queue_dir,
+                key,
+                idle_seconds=runner_idle_seconds,
+                manager_log=manager_log,
+                window_name=window_name,
+            )
+            launch = subprocess.run(
+                [
+                    *base_cmd,
+                    "new-window",
+                    "-d",
+                    "-P",
+                    "-F",
+                    "#{window_id}\t#{pane_id}\t#{pane_pid}",
+                    "-t",
+                    f"{tmux_session_name}:",
+                    "-n",
+                    window_name,
+                    "-c",
+                    str(cwd),
+                    runner_cmd,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if launch.returncode != 0:
+                update_metadata(
+                    paths.metadata,
+                    status="failed",
+                    completed_at=iso_now(),
+                    exit_code=launch.returncode,
+                    error=launch.stderr.strip(),
+                )
+                append_manager_log(manager_log, "failed", key=key, reason="new-window", exit_code=launch.returncode)
+                try:
+                    request_path.unlink()
+                except OSError:
+                    pass
+                sys.stderr.write(launch.stderr)
+                return launch.returncode or 1
+            window_id, pane_id, pane_pid = (launch.stdout.strip().split("\t") + ["", "", ""])[:3]
+            append_manager_log(
+                manager_log,
+                "opened",
+                key=key,
+                window_id=window_id or None,
+                window_name=window_name,
+                pane_id=pane_id or None,
+                pid=int(pane_pid) if pane_pid.isdigit() else None,
+                keep_window=args.tmux_keep_window,
+                idle_seconds=runner_idle_seconds,
+            )
         pid = int(pane_pid) if pane_pid.isdigit() else None
-        append_manager_log(
-            manager_log,
-            "opened",
-            key=key,
-            window_id=window_id or None,
-            window_name=window_name,
-            pane_id=pane_id or None,
-            pid=pid,
-            keep_window=args.tmux_keep_window,
-        )
         tmux_fields: dict[str, Any] = {
             "pid": pid,
             "launcher": launcher,
@@ -1365,6 +1552,9 @@ def start_background(args: argparse.Namespace, cwd: Path, stdin_text: str, start
             tmux_fields["tmux_socket_name"] = args.tmux_socket_name
         update_metadata(paths.metadata, **tmux_fields)
     else:
+        atomic_write_json(paths.request, request)
+        update_metadata(paths.metadata, request_path=str(paths.request))
+        worker_args = [sys.executable, str(Path(__file__).resolve()), "_worker", "--request-file", str(paths.request)]
         stdout_file = paths.stdout_log.open("a", encoding="utf-8")
         stderr_file = paths.stderr_log.open("a", encoding="utf-8")
         proc = subprocess.Popen(
@@ -1658,6 +1848,7 @@ def command_cancel(argv: list[str]) -> int:
         terminate_pid(metadata.get("pid"))
 
     cleanup_request_file(metadata)
+    cleanup_request_queue(metadata)
     update_metadata(
         paths.metadata,
         status="cancelled",
@@ -1724,6 +1915,166 @@ def command_worker(argv: list[str]) -> int:
             pass
 
 
+def write_terminal_bytes(stream: Any, data: bytes) -> None:
+    buffer = getattr(stream, "buffer", None)
+    if buffer is not None:
+        buffer.write(data)
+        buffer.flush()
+        return
+    stream.write(data.decode("utf-8", errors="replace"))
+    stream.flush()
+
+
+def tee_worker_request(request_path: Path, request: dict[str, Any]) -> int:
+    key = safe_key(str(request.get("key") or request_path.stem))
+    store_dir = Path(str(request.get("store_dir") or request_path.parent.parent)).expanduser()
+    paths = review_paths(store_dir, key)
+    worker_args = [sys.executable, str(Path(__file__).resolve()), "_worker", "--request-file", str(request_path)]
+    cwd = Path(str(request.get("cwd") or Path.cwd()))
+    try:
+        proc = subprocess.Popen(
+            worker_args,
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+    except OSError as exc:
+        message = f"Failed to start review worker: {exc}\n"
+        paths.stderr_log.parent.mkdir(parents=True, exist_ok=True)
+        with paths.stderr_log.open("ab") as stderr_log:
+            data = message.encode("utf-8", errors="replace")
+            write_terminal_bytes(sys.stderr, data)
+            stderr_log.write(data)
+        update_metadata(
+            paths.metadata,
+            status="failed",
+            completed_at=iso_now(),
+            exit_code=1,
+            error=message.strip(),
+        )
+        try:
+            request_path.unlink()
+        except OSError:
+            pass
+        return 1
+
+    streams: dict[int, tuple[Any, Any, Any]] = {}
+    paths.stdout_log.parent.mkdir(parents=True, exist_ok=True)
+    with (
+        paths.stdout_log.open("ab") as stdout_log,
+        paths.stderr_log.open("ab") as stderr_log,
+    ):
+        if proc.stdout is not None:
+            streams[proc.stdout.fileno()] = (proc.stdout, sys.stdout, stdout_log)
+        if proc.stderr is not None:
+            streams[proc.stderr.fileno()] = (proc.stderr, sys.stderr, stderr_log)
+
+        while streams:
+            ready, _, _ = select.select(list(streams), [], [], 0.2)
+            if not ready and proc.poll() is not None:
+                ready = list(streams)
+            for fd in ready:
+                source, terminal, log_file = streams[fd]
+                try:
+                    chunk = os.read(fd, 8192)
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    streams.pop(fd, None)
+                    try:
+                        source.close()
+                    except OSError:
+                        pass
+                    continue
+                write_terminal_bytes(terminal, chunk)
+                log_file.write(chunk)
+                log_file.flush()
+
+    return proc.wait()
+
+
+def command_runner(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=argparse.SUPPRESS)
+    parser.add_argument("--queue-dir", required=True)
+    parser.add_argument("--key", required=True)
+    parser.add_argument("--idle-seconds", type=int, required=True)
+    parser.add_argument("--manager-log", required=True)
+    parser.add_argument("--window-name", required=True)
+    args = parser.parse_args(argv)
+
+    queue_dir = Path(args.queue_dir).expanduser()
+    key = safe_key(args.key)
+    manager_log = Path(args.manager_log).expanduser()
+    paths = review_paths(queue_dir.parent, key)
+    idle_label = "never" if args.idle_seconds < 0 else str(args.idle_seconds)
+    print(
+        "\n".join(
+            [
+                f"Claude review runner key={key}",
+                f"queue: {queue_dir}",
+                f"stdout log: {paths.stdout_log}",
+                f"stderr log: {paths.stderr_log}",
+                f"idle timeout seconds: {idle_label}",
+                "",
+            ]
+        ),
+        flush=True,
+    )
+
+    last_activity = epoch_seconds()
+    while True:
+        queued = queued_request_files(queue_dir)
+        if queued:
+            request_path = None
+            for candidate in queued:
+                request_path = claim_queued_request(candidate)
+                if request_path is not None:
+                    break
+            if request_path is None:
+                continue
+            request = read_json(request_path)
+            request_key = safe_key(str(request.get("key") or key))
+            round_index = request.get("round_index")
+            window_name = str(request.get("window_name") or args.window_name)
+            request_paths = review_paths(queue_dir.parent, request_key)
+            update_metadata(
+                request_paths.metadata,
+                active_request_path=str(request_path),
+                request_path=str(request_path),
+            )
+            print(
+                f"\n=== Claude review key={request_key} round={round_index or '?'} ===\n",
+                flush=True,
+            )
+            status = tee_worker_request(request_path, request)
+            print(f"\nClaude review finished with exit={status}\n", flush=True)
+            append_manager_log(
+                manager_log,
+                "closed",
+                key=request_key,
+                round_index=round_index,
+                window_name=window_name,
+                stdout_log=paths.stdout_log,
+                stderr_log=paths.stderr_log,
+                exit=status,
+            )
+            last_activity = epoch_seconds()
+            continue
+
+        if args.idle_seconds >= 0 and epoch_seconds() - last_activity >= args.idle_seconds:
+            append_manager_log(
+                manager_log,
+                "runner-exit",
+                key=key,
+                window_name=args.window_name,
+                idle_seconds=args.idle_seconds,
+            )
+            print("Claude review runner idle timeout reached; exiting.", flush=True)
+            return 0
+        time.sleep(0.2)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "start":
@@ -1742,6 +2093,8 @@ def main(argv: list[str] | None = None) -> int:
         return command_manager_event(argv[1:])
     elif argv and argv[0] == "_worker":
         return command_worker(argv[1:])
+    elif argv and argv[0] == "_runner":
+        return command_runner(argv[1:])
     else:
         start_argv = argv
 

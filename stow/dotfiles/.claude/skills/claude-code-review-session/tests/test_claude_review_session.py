@@ -47,6 +47,7 @@ def args(**overrides):
         "stream": False,
         "system_extra": None,
         "tmux_keep_window": False,
+        "tmux_runner_idle_seconds": None,
         "tools": "read-only",
     }
     values.update(overrides)
@@ -252,6 +253,22 @@ class ClaudeReviewSessionTests(unittest.TestCase):
         self.assertEqual(paths.stderr_log, Path("/tmp/reviews/feature-key.stderr.log"))
         self.assertEqual(paths.stream_log, Path("/tmp/reviews/feature-key.stream.jsonl"))
         self.assertEqual(paths.request, Path("/tmp/reviews/feature-key.request.json"))
+
+    def test_queue_claim_renames_request_once(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            queue_dir = Path(tmpdir) / "review-key.queue"
+            queue_dir.mkdir()
+            request = queue_dir / "1.json"
+            request.write_text('{"prompt":"review"}\n', encoding="utf-8")
+
+            claimed = mod.claim_queued_request(request)
+            claimed_again = mod.claim_queued_request(request)
+
+            self.assertIsNotNone(claimed)
+            self.assertFalse(request.exists())
+            self.assertTrue(claimed.exists())
+            self.assertIsNone(claimed_again)
+            self.assertEqual(mod.queued_request_files(queue_dir), [])
 
     def test_run_returns_timeout_completed_process(self):
         proc = mod.run(
@@ -1075,6 +1092,140 @@ class ClaudeReviewSessionTests(unittest.TestCase):
             self.assertEqual(unbounded.returncode, 0, unbounded.stderr)
 
     @unittest.skipUnless(shutil.which("tmux"), "tmux is not installed")
+    def test_tmux_background_reuses_runner_window_for_followup_rounds(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            tmux_session = f"claude-review-test-runner-{os.getpid()}"
+            counter = tmp_path / "counter.txt"
+            argv_log = tmp_path / "argv.jsonl"
+            fake_claude = tmp_path / "fake_claude.py"
+            fake_claude.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env python3",
+                        "import json, pathlib, sys",
+                        f"counter = pathlib.Path({str(counter)!r})",
+                        f"argv_log = pathlib.Path({str(argv_log)!r})",
+                        "count = int(counter.read_text() or '0') + 1 if counter.exists() else 1",
+                        "counter.write_text(str(count))",
+                        "argv_log.write_text(argv_log.read_text() + json.dumps(sys.argv) + '\\n' if argv_log.exists() else json.dumps(sys.argv) + '\\n')",
+                        "sys.stdin.read()",
+                        "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': f'fake-runner-review-{count}', 'session_id': 'fake-runner-session', 'total_cost_usd': 0}), flush=True)",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fake_claude.chmod(0o755)
+
+            base_cmd = [
+                sys.executable,
+                str(SCRIPT),
+                "start",
+                "--background",
+                "--background-launcher",
+                "tmux",
+                "--tmux-session",
+                tmux_session,
+                "--tmux-runner-idle-seconds",
+                "30",
+                "--key",
+                "runner-reuse-test",
+                "--store-dir",
+                tmpdir,
+                "--claude-bin",
+                str(fake_claude),
+                "--no-diff",
+                "--heartbeat-seconds",
+                "1",
+            ]
+
+            try:
+                cleanup_tmux_session(tmux_session)
+                first = subprocess.run(
+                    [*base_cmd, "Review this."],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=10,
+                )
+                self.assertEqual(first.returncode, 0, first.stderr)
+
+                wait_first = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        "wait",
+                        "--key",
+                        "runner-reuse-test",
+                        "--store-dir",
+                        tmpdir,
+                        "--poll-seconds",
+                        "1",
+                        "--timeout-seconds",
+                        "5",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=10,
+                )
+                self.assertEqual(wait_first.returncode, 0, wait_first.stderr)
+                first_metadata = json.loads((tmp_path / "runner-reuse-test.json").read_text(encoding="utf-8"))
+                self.assertEqual(first_metadata["round_index"], 1)
+                self.assertEqual(first_metadata["tmux_window_name"], "review-runner-reuse-test")
+                self.assertTrue(tmux_window_exists(first_metadata["tmux_window_id"]))
+
+                second = subprocess.run(
+                    [*base_cmd, "Follow up."],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=10,
+                )
+                self.assertEqual(second.returncode, 0, second.stderr)
+
+                wait_second = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        "wait",
+                        "--key",
+                        "runner-reuse-test",
+                        "--store-dir",
+                        tmpdir,
+                        "--poll-seconds",
+                        "1",
+                        "--timeout-seconds",
+                        "5",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=10,
+                )
+                self.assertEqual(wait_second.returncode, 0, wait_second.stderr)
+                second_metadata = json.loads((tmp_path / "runner-reuse-test.json").read_text(encoding="utf-8"))
+                self.assertEqual(second_metadata["round_index"], 2)
+                self.assertEqual(second_metadata["tmux_window_id"], first_metadata["tmux_window_id"])
+                self.assertEqual(second_metadata["tmux_window_name"], first_metadata["tmux_window_name"])
+                self.assertEqual((tmp_path / "runner-reuse-test.findings.md").read_text(encoding="utf-8"), "fake-runner-review-2")
+
+                invocations = [json.loads(line) for line in argv_log.read_text(encoding="utf-8").splitlines()]
+                self.assertEqual(len(invocations), 2)
+                self.assertNotIn("--resume", invocations[0])
+                self.assertIn("--resume", invocations[1])
+                self.assertEqual(invocations[1][invocations[1].index("--resume") + 1], "fake-runner-session")
+
+                manager_log = mod.tmux_manager_log_path(Path(tmpdir), tmux_session)
+                log_text = manager_log.read_text(encoding="utf-8")
+                self.assertEqual(log_text.count("event=opened"), 1)
+                self.assertEqual(log_text.count("event=queued"), 2)
+                self.assertEqual(log_text.count("event=closed"), 2)
+            finally:
+                cleanup_tmux_session(tmux_session)
+
+    @unittest.skipUnless(shutil.which("tmux"), "tmux is not installed")
     def test_background_lifecycle_with_fake_claude_via_tmux(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -1199,7 +1350,7 @@ class ClaudeReviewSessionTests(unittest.TestCase):
                 )
                 self.assertEqual(shell_option.returncode, 0, shell_option.stderr)
                 self.assertEqual(shell_option.stdout.strip(), "default-shell /bin/bash")
-                self.assertTrue(wait_for_tmux_window_absent(metadata["tmux_window_id"]))
+                self.assertTrue(tmux_window_exists(metadata["tmux_window_id"]))
                 names = subprocess.run(
                     ["tmux", "list-windows", "-t", tmux_session, "-F", "#{window_name}"],
                     text=True,
@@ -1208,13 +1359,13 @@ class ClaudeReviewSessionTests(unittest.TestCase):
                     timeout=10,
                 )
                 self.assertEqual(names.returncode, 0, names.stderr)
-                self.assertNotIn(metadata["tmux_window_name"], names.stdout.splitlines())
+                self.assertIn(metadata["tmux_window_name"], names.stdout.splitlines())
                 manager_log = mod.tmux_manager_log_path(Path(tmpdir), tmux_session)
                 log_text = manager_log.read_text(encoding="utf-8")
                 self.assertIn("event=opened", log_text)
                 self.assertIn("event=closed", log_text)
                 self.assertIn("key=bg-tmux-test", log_text)
-                self.assertIn("window_name=review-bg-tmux-test-r1", log_text)
+                self.assertIn("window_name=review-bg-tmux-test", log_text)
             finally:
                 cleanup_tmux_session(tmux_session)
 
@@ -1474,6 +1625,8 @@ class ClaudeReviewSessionTests(unittest.TestCase):
                         "--tmux-session",
                         tmux_session,
                         "--no-tmux-keep-window",
+                        "--tmux-runner-idle-seconds",
+                        "0",
                         "--key",
                         "close-test",
                         "--store-dir",
@@ -1513,6 +1666,59 @@ class ClaudeReviewSessionTests(unittest.TestCase):
                 metadata = json.loads((tmp_path / "close-test.json").read_text(encoding="utf-8"))
                 self.assertFalse(metadata["tmux_keep_window"])
                 self.assertTrue(wait_for_tmux_window_absent(metadata["tmux_window_id"]))
+
+                second = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        "start",
+                        "--background",
+                        "--background-launcher",
+                        "tmux",
+                        "--tmux-session",
+                        tmux_session,
+                        "--no-tmux-keep-window",
+                        "--tmux-runner-idle-seconds",
+                        "0",
+                        "--key",
+                        "close-test",
+                        "--store-dir",
+                        tmpdir,
+                        "--claude-bin",
+                        str(fake_claude),
+                        "--no-diff",
+                        "Follow up.",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=10,
+                )
+                self.assertEqual(second.returncode, 0, second.stderr)
+
+                wait_second = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        "wait",
+                        "--key",
+                        "close-test",
+                        "--store-dir",
+                        tmpdir,
+                        "--poll-seconds",
+                        "1",
+                        "--timeout-seconds",
+                        "5",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=10,
+                )
+                self.assertEqual(wait_second.returncode, 0, wait_second.stderr)
+                metadata_second = json.loads((tmp_path / "close-test.json").read_text(encoding="utf-8"))
+                self.assertEqual(metadata_second["round_index"], 2)
+                self.assertTrue(wait_for_tmux_window_absent(metadata_second["tmux_window_id"]))
             finally:
                 cleanup_tmux_session(tmux_session)
 
@@ -1550,7 +1756,11 @@ class ClaudeReviewSessionTests(unittest.TestCase):
             tmp_path = Path(tmpdir)
             metadata = tmp_path / "dead-worker.json"
             request = tmp_path / "dead-worker.request.json"
+            queue_dir = tmp_path / "dead-worker.queue"
+            queue_dir.mkdir()
+            queued = queue_dir / "queued.json"
             request.write_text('{"stdin_text":"sensitive diff"}\n', encoding="utf-8")
+            queued.write_text('{"stdin_text":"queued diff"}\n', encoding="utf-8")
             mod.atomic_write_json(
                 metadata,
                 {
@@ -1560,6 +1770,7 @@ class ClaudeReviewSessionTests(unittest.TestCase):
                     "last_heartbeat_at": mod.iso_from_epoch(mod.epoch_seconds() - 120),
                     "heartbeat_interval_seconds": 30,
                     "request_path": str(request),
+                    "request_queue_dir": str(queue_dir),
                 },
             )
 
@@ -1586,6 +1797,7 @@ class ClaudeReviewSessionTests(unittest.TestCase):
             persisted = json.loads(metadata.read_text(encoding="utf-8"))
             self.assertEqual(persisted["status"], "crashed")
             self.assertFalse(request.exists())
+            self.assertEqual(list(queue_dir.iterdir()), [])
 
     def test_status_persists_stalled_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1747,6 +1959,45 @@ class ClaudeReviewSessionTests(unittest.TestCase):
             self.assertEqual(done.stdout, "done findings")
             self.assertEqual(failed.returncode, 1)
             self.assertEqual(failed.stdout.strip(), "failed")
+
+    def test_cancel_purges_tmux_request_queue(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            queue_dir = tmp_path / "cancel-queued.queue"
+            queue_dir.mkdir()
+            first = queue_dir / "1.json"
+            second = queue_dir / "2.json"
+            first.write_text('{"prompt":"first"}\n', encoding="utf-8")
+            second.write_text('{"prompt":"second"}\n', encoding="utf-8")
+            mod.atomic_write_json(
+                tmp_path / "cancel-queued.json",
+                {
+                    "key": "cancel-queued",
+                    "status": "running",
+                    "request_path": str(second),
+                    "request_queue_dir": str(queue_dir),
+                },
+            )
+
+            cancel = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "cancel",
+                    "--key",
+                    "cancel-queued",
+                    "--store-dir",
+                    tmpdir,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+
+            self.assertEqual(cancel.returncode, 0, cancel.stderr)
+            self.assertEqual(cancel.stdout.strip(), "cancelled")
+            self.assertEqual(list(queue_dir.iterdir()), [])
 
     def test_cancel_does_not_overwrite_terminal_status(self):
         with tempfile.TemporaryDirectory() as tmpdir:

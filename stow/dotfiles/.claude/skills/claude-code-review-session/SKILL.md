@@ -78,12 +78,15 @@ python ~/.claude/skills/claude-code-review-session/scripts/claude_review_session
 
 `--background-launcher auto` is the default. It uses `tmux` when available because managed exec harnesses can kill ordinary child processes after the parent command exits.
 
-By default, background jobs use Claude `stream-json` so the wrapper can record Claude activity separately from wrapper heartbeat. Tmux jobs use the normal tmux server and a single visible manager session named `claude-review`. This makes review activity discoverable with `tmux ls`; attach with `tmux attach -t claude-review`. Each active review runs in a separate window named `review-<key>-r<round>` using `bash --noprofile --norc` so shell startup banners do not pollute the pane. The review window shows a small banner plus streamed partial text/live stdout/stderr, while `tee` also appends that output to durable logs under `~/.claude/review-sessions/`. Completed review windows close by default; the persistent `manager` window tails `~/.claude/review-sessions/claude-review.manager.log` and records triggered/opened/closed/cancelled/failed events for audit.
+By default, background jobs use Claude `stream-json` so the wrapper can record Claude activity separately from wrapper heartbeat. Tmux jobs use the normal tmux server and a single visible manager session named `claude-review`. This makes review activity discoverable with `tmux ls`; attach with `tmux attach -t claude-review`.
+
+Tmux mode uses one lightweight runner window per review key, named `review-<key>`. The runner owns a small request queue for that key, launches `claude -p` for each queued round, streams stdout/stderr into the pane, and appends the same output to durable logs under `~/.claude/review-sessions/`. This keeps a stable window/name across follow-up rounds while preserving structured Claude JSON output for status and results. The persistent `manager` window tails `~/.claude/review-sessions/claude-review.manager.log` and records triggered/queued/opened/reused/closed/cancelled/failed/runner-exit events for audit.
 
 - Use `--tmux-session <name>` to choose a different visible manager session.
 - Use `--background-launcher subprocess` only in a normal shell where child processes survive parent exit.
 - Use `--background-launcher tmux --tmux-socket-name <name>` only when you intentionally want an isolated tmux server instead of visibility in normal `tmux ls`.
-- Use `--tmux-keep-window` when you explicitly want completed review panes to stay open for manual inspection.
+- Use `--tmux-runner-idle-seconds <n>` to control per-key runner persistence after the queue drains. Default is `300`; `0` exits immediately after a round; negative values keep the runner indefinitely.
+- Use `--tmux-keep-window` when you explicitly want the per-key runner to stay open indefinitely for manual inspection.
 - Use `--no-stream` only when you need the older single-result JSON behavior.
 - Use `cancel --key <key>` to kill only that review window; it leaves the manager session and other review windows alone.
 
