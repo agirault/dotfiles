@@ -1,0 +1,4 @@
+interface:
+  display_name: "Claude Reviewed Development Loop"
+  short_description: "Continuous implementation workflow with persistent Claude review"
+  default_prompt: "Use $claude-reviewed-development-loop to work through this multi-step task with recurring Claude plan, design, and code review."

@@ -59,6 +59,8 @@ REQUIREMENTS_SYSTEM_PROMPT = (
 
 READ_ONLY_TOOLS = "Read,Grep,Glob,LS"
 STREAM_METADATA_INTERVAL_SECONDS = 1.0
+DEFAULT_STORE_DIR = "~/.claude/review-sessions"
+DEFAULT_TMUX_SESSION = "claude-review"
 
 CALLER_PREFIX_ENV = (
     "CLAUDE_SESSION_NAME",
@@ -70,6 +72,10 @@ CALLER_PREFIX_ENV = (
 
 TERMINAL_STATUSES = {"done", "failed", "timeout", "crashed", "cancelled"}
 
+
+# ---------------------------------------------------------------------------
+# Data model
+# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class ReviewPaths:
@@ -97,6 +103,10 @@ class StreamMetadataState:
     last_partial_text_at: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# Process and path utilities
+# ---------------------------------------------------------------------------
+
 def epoch_seconds() -> float:
     return time.time()
 
@@ -119,6 +129,8 @@ def epoch_from_iso(value: str | None) -> float | None:
 
 
 def pid_alive(pid: int | None) -> bool:
+    # os.kill(pid, 0) is a portable existence check; the ps fallback helps in
+    # sandboxed contexts where /proc and signal visibility can disagree.
     if not pid:
         return False
     try:
@@ -135,7 +147,8 @@ def pid_alive(pid: int | None) -> bool:
         return proc.returncode == 0 and proc.stdout.strip() == str(pid)
     except PermissionError:
         return True
-    return True
+    else:
+        return True
 
 
 def run(
@@ -203,6 +216,13 @@ def review_paths(store_dir: Path, key: str) -> ReviewPaths:
     )
 
 
+def unlink_silent(path: Path) -> None:
+    try:
+        path.unlink()
+    except (FileNotFoundError, OSError):
+        pass
+
+
 def default_key(cwd: Path) -> str:
     repo, branch, digest = repo_identity(cwd)
     return safe_key(f"{repo}-{branch}-{digest}")
@@ -236,12 +256,14 @@ def review_session_name(args: argparse.Namespace, key: str) -> str:
     return f"{name[:111].rstrip('-')}-{digest}"
 
 
-def tmux_window_name(key: str, round_index: int | None = None) -> str:
-    suffix = f"-r{round_index}" if round_index is not None else ""
+def tmux_window_name(key: str) -> str:
     base = f"review-{safe_key(key)}"
-    max_base_len = max(1, 80 - len(suffix))
-    return f"{base[:max_base_len].rstrip('-')}{suffix}"
+    return base[:80].rstrip("-")
 
+
+# ---------------------------------------------------------------------------
+# Request queue helpers
+# ---------------------------------------------------------------------------
 
 def review_queue_dir(paths: ReviewPaths) -> Path:
     return paths.metadata.with_suffix(".queue")
@@ -266,6 +288,8 @@ def queued_request_files(queue_dir: Path) -> list[Path]:
 
 
 def claim_queued_request(path: Path) -> Path | None:
+    # Atomic rename lets concurrent runners compete without processing the
+    # same queued review round twice.
     claimed = path.with_name(f"{path.name}.claimed-{os.getpid()}")
     try:
         path.rename(claimed)
@@ -277,6 +301,8 @@ def claim_queued_request(path: Path) -> Path | None:
 
 
 def cleanup_request_queue(payload: dict[str, Any]) -> None:
+    # Cancellation/crash cleanup is best-effort: stale queue files should not
+    # prevent reporting the terminal review state.
     queue_dir = payload.get("request_queue_dir")
     if not queue_dir:
         return
@@ -313,6 +339,10 @@ def resolve_background_launcher(requested: str) -> str:
     return requested
 
 
+# ---------------------------------------------------------------------------
+# Tmux helpers
+# ---------------------------------------------------------------------------
+
 def tmux_base_cmd(socket_name: str | None) -> list[str]:
     if socket_name:
         return ["tmux", "-L", socket_name]
@@ -321,6 +351,10 @@ def tmux_base_cmd(socket_name: str | None) -> list[str]:
 
 def shell_join(args: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in args)
+
+
+def split_tsv_fields(text: str, count: int) -> list[str]:
+    return (text.strip().split("\t") + [""] * count)[:count]
 
 
 def logfmt_value(value: Any) -> str:
@@ -359,64 +393,6 @@ def tmux_manager_command(manager_log: Path) -> str:
         + "tail -n 200 -F "
         + shlex.quote(str(manager_log))
     )
-    return shell_join(["bash", "--noprofile", "--norc", "-lc", script])
-
-
-def tmux_worker_command(
-    worker_args: list[str],
-    paths: ReviewPaths,
-    key: str,
-    *,
-    keep_window: bool,
-    manager_log: Path | None = None,
-    round_index: int | None = None,
-    window_name: str | None = None,
-) -> str:
-    banner = (
-        f"Claude review key={safe_key(key)}\n"
-        f"stdout log: {paths.stdout_log}\n"
-        f"stderr log: {paths.stderr_log}\n"
-    )
-    script = (
-        "printf '%s' "
-        + shlex.quote(banner)
-        + "; "
-        + shell_join(worker_args)
-        + " 2> >(tee -a "
-        + shlex.quote(str(paths.stderr_log))
-        + " >&2) | tee -a "
-        + shlex.quote(str(paths.stdout_log))
-        + "; status=${PIPESTATUS[0]}; printf '\\nClaude review finished with exit=%s\\n' \"$status\"; "
-    )
-    if manager_log is not None:
-        manager_event_cmd = [
-            sys.executable,
-            str(Path(__file__).resolve()),
-            "_manager_event",
-            "--log-path",
-            str(manager_log.expanduser()),
-            "--event",
-            "closed",
-            "--field",
-            f"key={safe_key(key)}",
-            "--field",
-            f"stdout_log={paths.stdout_log}",
-            "--field",
-            f"stderr_log={paths.stderr_log}",
-        ]
-        if round_index is not None:
-            manager_event_cmd.extend(["--field", f"round_index={round_index}"])
-        if window_name:
-            manager_event_cmd.extend(["--field", f"window_name={window_name}"])
-        script += (
-            shell_join(manager_event_cmd)
-            + " --exit-status \"$status\""
-            + "; "
-        )
-    if keep_window:
-        script += "printf 'Logs remain at the paths above. Close this window when done.\\n'; exec bash --noprofile --norc"
-    else:
-        script += "exit $status"
     return shell_join(["bash", "--noprofile", "--norc", "-lc", script])
 
 
@@ -486,7 +462,7 @@ def find_tmux_window(base_cmd: list[str], session_name: str, window_name: str) -
     )
     if pane.returncode != 0:
         return None
-    pane_id, pane_pid, pane_dead = (pane.stdout.strip().split("\t") + ["", "", ""])[:3]
+    pane_id, pane_pid, pane_dead = split_tsv_fields(pane.stdout, 3)
     if pane_dead == "1":
         return None
     return {"window_id": window_id, "pane_id": pane_id, "pane_pid": pane_pid}
@@ -522,6 +498,8 @@ def ensure_tmux_session(
     cwd: Path,
     manager_log: Path,
 ) -> subprocess.CompletedProcess[str]:
+    # The manager window is the human-visible audit surface; runner windows do
+    # the actual review work and may come and go.
     existing = subprocess.run(
         [*base_cmd, "has-session", "-t", session_name],
         text=True,
@@ -655,6 +633,10 @@ def ensure_tmux_session(
     return manager
 
 
+# ---------------------------------------------------------------------------
+# Metadata and status
+# ---------------------------------------------------------------------------
+
 def read_store(path: Path) -> str | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -680,6 +662,8 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def update_metadata(path: Path, **fields: Any) -> dict[str, Any]:
+    # Metadata is the cross-process contract between start/check/status/wait
+    # and background workers, so updates are file-locked and atomic.
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_suffix(path.suffix + ".lock")
     with lock_path.open("a+", encoding="utf-8") as lock_file:
@@ -731,6 +715,8 @@ def write_store(
 
 
 def status_payload(metadata: dict[str, Any]) -> dict[str, Any]:
+    # Status is derived from both wrapper heartbeat and Claude stream activity:
+    # a live wrapper with a quiet stream is stalled, not necessarily crashed.
     payload = dict(metadata)
     status = str(payload.get("status") or "missing")
     heartbeat_interval = int(payload.get("heartbeat_interval_seconds") or 30)
@@ -788,12 +774,7 @@ def cleanup_request_file(payload: dict[str, Any]) -> None:
     request_path = payload.get("request_path")
     if not request_path:
         return
-    try:
-        Path(str(request_path)).expanduser().unlink()
-    except FileNotFoundError:
-        return
-    except OSError:
-        return
+    unlink_silent(Path(str(request_path)).expanduser())
 
 
 def reconcile_status(paths: ReviewPaths, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -854,6 +835,10 @@ def git_context(cwd: Path, base: str, max_bytes: int, pathspecs: list[str], git_
     )
 
 
+# ---------------------------------------------------------------------------
+# Claude output parsing
+# ---------------------------------------------------------------------------
+
 def parse_claude_json(stdout: str) -> dict[str, Any] | None:
     text = stdout.strip()
     if not text:
@@ -873,6 +858,18 @@ def parse_claude_json(stdout: str) -> dict[str, Any] | None:
     return None
 
 
+def text_content_items(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [
+        item["text"]
+        for item in value
+        if isinstance(item, dict)
+        and item.get("type") == "text"
+        and isinstance(item.get("text"), str)
+    ]
+
+
 def extract_stream_text(event: dict[str, Any]) -> str:
     if event.get("type") == "stream_event" and isinstance(event.get("event"), dict):
         return extract_stream_text(event["event"])
@@ -889,19 +886,13 @@ def extract_stream_text(event: dict[str, Any]) -> str:
 
     content = event.get("content")
     if isinstance(content, list):
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
-                pieces.append(item["text"])
+        pieces.extend(text_content_items(content))
     elif isinstance(content, str) and "partial" in event_type:
         pieces.append(content)
 
     message = event.get("message")
     if isinstance(message, dict):
-        message_content = message.get("content")
-        if isinstance(message_content, list):
-            for item in message_content:
-                if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
-                    pieces.append(item["text"])
+        pieces.extend(text_content_items(message.get("content")))
 
     if isinstance(event.get("text"), str) and "partial" in event_type:
         pieces.append(str(event["text"]))
@@ -917,6 +908,8 @@ def handle_stream_line(
     stream_log: TextIO | None = None,
     metadata_interval_seconds: float = STREAM_METADATA_INTERVAL_SECONDS,
 ) -> dict[str, Any] | None:
+    # Every stream event is written to the audit log; metadata updates are
+    # throttled so large stream bursts do not churn the filesystem.
     paths.stream_log.parent.mkdir(parents=True, exist_ok=True)
     if stream_log is None:
         with paths.stream_log.open("a", encoding="utf-8") as owned_stream_log:
@@ -965,6 +958,10 @@ def handle_stream_line(
     return event
 
 
+# ---------------------------------------------------------------------------
+# Prompt and Claude command construction
+# ---------------------------------------------------------------------------
+
 def requirements_context(args: argparse.Namespace) -> str:
     parts: list[str] = []
 
@@ -1000,6 +997,8 @@ def review_system_prompt(args: argparse.Namespace, has_requirements: bool) -> st
 
 
 def build_prompt(args: argparse.Namespace, stdin_text: str, include_diff: bool, cwd: Path) -> str:
+    # Prefer path-based review context; only paste stdin, requirements, and git
+    # diff context that the caller explicitly provided or requested.
     user_prompt = " ".join(args.prompt).strip() if args.prompt else ""
     parts = [user_prompt or DEFAULT_PROMPT]
 
@@ -1055,6 +1054,43 @@ def claude_command(args: argparse.Namespace, session_id: str | None, key: str, r
     return cmd
 
 
+# ---------------------------------------------------------------------------
+# Claude execution
+# ---------------------------------------------------------------------------
+
+def write_run_start_metadata(
+    args: argparse.Namespace,
+    paths: ReviewPaths,
+    start_time: float,
+    *,
+    streaming: bool,
+) -> None:
+    # Streaming and non-streaming runs share the same lifecycle fields; only
+    # stream-specific liveness fields differ.
+    fields: dict[str, Any] = {
+        "status": "running",
+        "pid": os.getpid(),
+        "started_at": read_json(paths.metadata).get("started_at") or iso_from_epoch(start_time),
+        "last_heartbeat_at": iso_from_epoch(start_time),
+        "heartbeat_interval_seconds": args.heartbeat_seconds,
+        "timeout_seconds": args.timeout_seconds,
+        "stdout_log_path": str(paths.stdout_log),
+        "stderr_log_path": str(paths.stderr_log),
+        "stream_log_path": str(paths.stream_log),
+        "streaming": streaming,
+    }
+    if streaming:
+        fields.update(
+            {
+                "claude_event_count": 0,
+                "last_claude_event_at": None,
+                "last_claude_event_type": None,
+                "last_partial_text_at": None,
+            }
+        )
+    update_metadata(paths.metadata, **fields)
+
+
 def run_claude(
     args: argparse.Namespace,
     cwd: Path,
@@ -1074,61 +1110,47 @@ def run_claude(
 
     timed_out = False
     start_time = epoch_seconds()
-    update_metadata(
-        paths.metadata,
-        status="running",
-        pid=os.getpid(),
-        started_at=read_json(paths.metadata).get("started_at") or iso_from_epoch(start_time),
-        last_heartbeat_at=iso_from_epoch(start_time),
-        heartbeat_interval_seconds=args.heartbeat_seconds,
-        timeout_seconds=args.timeout_seconds,
-        stdout_log_path=str(paths.stdout_log),
-        stderr_log_path=str(paths.stderr_log),
-        stream_log_path=str(paths.stream_log),
-        streaming=False,
-    )
-
-    with (
-        prompt_path.open("r", encoding="utf-8") as stdin_file,
-        paths.stdout_log.open("a+", encoding="utf-8") as stdout_file,
-        paths.stderr_log.open("a+", encoding="utf-8") as stderr_file,
-    ):
-        stdout_file.seek(0, os.SEEK_END)
-        stderr_file.seek(0, os.SEEK_END)
-        stdout_offset = stdout_file.tell()
-        stderr_offset = stderr_file.tell()
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(cwd),
-            stdin=stdin_file,
-            stdout=stdout_file,
-            stderr=stderr_file,
-            text=True,
-        )
-        update_metadata(paths.metadata, claude_pid=proc.pid)
-
-        while proc.poll() is None:
-            elapsed = epoch_seconds() - start_time
-            if args.timeout_seconds and elapsed >= args.timeout_seconds:
-                timed_out = True
-                proc.kill()
-                break
-            update_metadata(paths.metadata, status="running", last_heartbeat_at=iso_now())
-            sleep_for = max(1, min(args.heartbeat_seconds, 5))
-            if args.timeout_seconds:
-                sleep_for = max(1, min(sleep_for, int(args.timeout_seconds - elapsed) or 1))
-            try:
-                proc.wait(timeout=sleep_for)
-                break
-            except subprocess.TimeoutExpired:
-                pass
-
-        returncode = proc.wait()
+    write_run_start_metadata(args, paths, start_time, streaming=False)
 
     try:
-        prompt_path.unlink()
-    except OSError:
-        pass
+        with (
+            prompt_path.open("r", encoding="utf-8") as stdin_file,
+            paths.stdout_log.open("a+", encoding="utf-8") as stdout_file,
+            paths.stderr_log.open("a+", encoding="utf-8") as stderr_file,
+        ):
+            stdout_file.seek(0, os.SEEK_END)
+            stderr_file.seek(0, os.SEEK_END)
+            stdout_offset = stdout_file.tell()
+            stderr_offset = stderr_file.tell()
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(cwd),
+                stdin=stdin_file,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                text=True,
+            )
+            update_metadata(paths.metadata, claude_pid=proc.pid)
+
+            while proc.poll() is None:
+                elapsed = epoch_seconds() - start_time
+                if args.timeout_seconds and elapsed >= args.timeout_seconds:
+                    timed_out = True
+                    proc.kill()
+                    break
+                update_metadata(paths.metadata, status="running", last_heartbeat_at=iso_now())
+                sleep_for = max(1, min(args.heartbeat_seconds, 5))
+                if args.timeout_seconds:
+                    sleep_for = max(1, min(sleep_for, int(args.timeout_seconds - elapsed) or 1))
+                try:
+                    proc.wait(timeout=sleep_for)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+
+            returncode = proc.wait()
+    finally:
+        unlink_silent(prompt_path)
 
     stdout = read_text_from_offset(paths.stdout_log, stdout_offset)
     stderr = read_text_from_offset(paths.stderr_log, stderr_offset)
@@ -1163,95 +1185,77 @@ def run_claude_streaming(
     heartbeat_write_interval = max(1, min(args.heartbeat_seconds, 5))
     stream_state = StreamMetadataState()
     final_event: dict[str, Any] | None = None
-    update_metadata(
-        paths.metadata,
-        status="running",
-        pid=os.getpid(),
-        started_at=read_json(paths.metadata).get("started_at") or iso_from_epoch(start_time),
-        last_heartbeat_at=iso_from_epoch(start_time),
-        heartbeat_interval_seconds=args.heartbeat_seconds,
-        timeout_seconds=args.timeout_seconds,
-        stdout_log_path=str(paths.stdout_log),
-        stderr_log_path=str(paths.stderr_log),
-        stream_log_path=str(paths.stream_log),
-        streaming=True,
-        claude_event_count=0,
-        last_claude_event_at=None,
-        last_claude_event_type=None,
-        last_partial_text_at=None,
-    )
-
-    with (
-        prompt_path.open("r", encoding="utf-8") as stdin_file,
-        paths.stderr_log.open("a+", encoding="utf-8") as stderr_file,
-        paths.stream_log.open("a", encoding="utf-8") as stream_log,
-    ):
-        stderr_file.seek(0, os.SEEK_END)
-        stderr_offset = stderr_file.tell()
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(cwd),
-            stdin=stdin_file,
-            stdout=subprocess.PIPE,
-            stderr=stderr_file,
-            text=True,
-            bufsize=1,
-        )
-        update_metadata(paths.metadata, claude_pid=proc.pid)
-
-        while True:
-            now = epoch_seconds()
-            elapsed = now - start_time
-            if args.timeout_seconds and elapsed >= args.timeout_seconds:
-                timed_out = True
-                proc.kill()
-                break
-
-            if now - last_heartbeat_update_at >= heartbeat_write_interval:
-                update_metadata(paths.metadata, status="running", last_heartbeat_at=iso_from_epoch(now))
-                last_heartbeat_update_at = now
-            sleep_for = heartbeat_write_interval
-            if args.timeout_seconds:
-                sleep_for = max(1, min(sleep_for, int(args.timeout_seconds - elapsed) or 1))
-
-            if proc.stdout is None:
-                break
-
-            ready, _, _ = select.select([proc.stdout], [], [], sleep_for)
-            if ready:
-                line = proc.stdout.readline()
-                if line:
-                    event = handle_stream_line(
-                        line,
-                        paths=paths,
-                        state=stream_state,
-                        stream_log=stream_log,
-                    )
-                    if isinstance(event, dict) and event.get("type") == "result":
-                        final_event = event
-                elif proc.poll() is not None:
-                    break
-
-            if proc.poll() is not None:
-                for line in proc.stdout:
-                    event = handle_stream_line(
-                        line,
-                        paths=paths,
-                        state=stream_state,
-                        stream_log=stream_log,
-                    )
-                    if isinstance(event, dict) and event.get("type") == "result":
-                        final_event = event
-                break
-
-        returncode = proc.wait()
-        if proc.stdout is not None:
-            proc.stdout.close()
+    write_run_start_metadata(args, paths, start_time, streaming=True)
 
     try:
-        prompt_path.unlink()
-    except OSError:
-        pass
+        with (
+            prompt_path.open("r", encoding="utf-8") as stdin_file,
+            paths.stderr_log.open("a+", encoding="utf-8") as stderr_file,
+            paths.stream_log.open("a", encoding="utf-8") as stream_log,
+        ):
+            stderr_file.seek(0, os.SEEK_END)
+            stderr_offset = stderr_file.tell()
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(cwd),
+                stdin=stdin_file,
+                stdout=subprocess.PIPE,
+                stderr=stderr_file,
+                text=True,
+                bufsize=1,
+            )
+            update_metadata(paths.metadata, claude_pid=proc.pid)
+
+            while True:
+                now = epoch_seconds()
+                elapsed = now - start_time
+                if args.timeout_seconds and elapsed >= args.timeout_seconds:
+                    timed_out = True
+                    proc.kill()
+                    break
+
+                if now - last_heartbeat_update_at >= heartbeat_write_interval:
+                    update_metadata(paths.metadata, status="running", last_heartbeat_at=iso_from_epoch(now))
+                    last_heartbeat_update_at = now
+                sleep_for = heartbeat_write_interval
+                if args.timeout_seconds:
+                    sleep_for = max(1, min(sleep_for, int(args.timeout_seconds - elapsed) or 1))
+
+                if proc.stdout is None:
+                    break
+
+                ready, _, _ = select.select([proc.stdout], [], [], sleep_for)
+                if ready:
+                    line = proc.stdout.readline()
+                    if line:
+                        event = handle_stream_line(
+                            line,
+                            paths=paths,
+                            state=stream_state,
+                            stream_log=stream_log,
+                        )
+                        if isinstance(event, dict) and event.get("type") == "result":
+                            final_event = event
+                    elif proc.poll() is not None:
+                        break
+
+                if proc.poll() is not None:
+                    for line in proc.stdout:
+                        event = handle_stream_line(
+                            line,
+                            paths=paths,
+                            state=stream_state,
+                            stream_log=stream_log,
+                        )
+                        if isinstance(event, dict) and event.get("type") == "result":
+                            final_event = event
+                    break
+
+            returncode = proc.wait()
+            if proc.stdout is not None:
+                proc.stdout.close()
+    finally:
+        unlink_silent(prompt_path)
 
     stderr = read_text_from_offset(paths.stderr_log, stderr_offset)
     stdout = json.dumps(final_event) if final_event is not None else ""
@@ -1273,6 +1277,10 @@ def should_retry_without_resume(proc: ReviewRunResult, session_id: str | None, e
     return "No conversation found with session ID" in combined
 
 
+# ---------------------------------------------------------------------------
+# Start command
+# ---------------------------------------------------------------------------
+
 def build_start_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run a persistent Claude Code review session and store the session id by key."
@@ -1282,7 +1290,7 @@ def build_start_parser() -> argparse.ArgumentParser:
     parser.add_argument("--new", action="store_true", help="Start a fresh session and overwrite the stored key.")
     parser.add_argument("--background", action="store_true", help="Start the review in the background and return after writing job metadata.")
     parser.add_argument("--session-id", help="Resume this explicit Claude session id.")
-    parser.add_argument("--store-dir", default="~/.claude/review-sessions", help="Directory for key -> session id files.")
+    parser.add_argument("--store-dir", default=DEFAULT_STORE_DIR, help="Directory for key -> session id files.")
     parser.add_argument("--claude-bin", default=os.environ.get("CLAUDE_BIN", "claude"), help="Claude Code executable.")
     parser.add_argument("--model", default=os.environ.get("CLAUDE_REVIEW_MODEL", "sonnet"), help="Claude model alias/name.")
     parser.add_argument("--mode", choices=sorted(MODE_SYSTEM_PROMPTS), default=os.environ.get("CLAUDE_REVIEW_MODE", "implementation"), help="Reviewer stance.")
@@ -1299,7 +1307,7 @@ def build_start_parser() -> argparse.ArgumentParser:
     parser.add_argument("--heartbeat-seconds", type=int, default=30, help="How often the wrapper updates running metadata.")
     parser.add_argument("--stream", action=argparse.BooleanOptionalAction, default=None, help="Use Claude stream-json and record Claude event activity. Defaults on for background runs.")
     parser.add_argument("--background-launcher", choices=("auto", "subprocess", "tmux"), default="auto", help="How to launch background workers.")
-    parser.add_argument("--tmux-session", default=os.environ.get("CLAUDE_REVIEW_TMUX_SESSION", "claude-review"), help="Normal tmux session used for review windows.")
+    parser.add_argument("--tmux-session", default=os.environ.get("CLAUDE_REVIEW_TMUX_SESSION", DEFAULT_TMUX_SESSION), help="Normal tmux session used for review windows.")
     parser.add_argument("--tmux-socket-name", default=os.environ.get("CLAUDE_REVIEW_TMUX_SOCKET"), help="Optional dedicated tmux socket name. Omit to use the normal tmux server.")
     parser.add_argument("--tmux-keep-window", action=argparse.BooleanOptionalAction, default=False, help="Keep the per-key tmux runner window open indefinitely after completion.")
     parser.add_argument("--tmux-runner-idle-seconds", type=int, help="How long an idle per-key tmux runner window stays open after its queue drains. Default 300, 0 exits immediately, negative never exits.")
@@ -1354,12 +1362,28 @@ def prepare_start(args: argparse.Namespace, cwd: Path, stdin_text: str) -> tuple
     return key, paths, session_id, requirements_present, include_diff, prompt, session_name, round_index
 
 
+def background_child_argv(start_argv: list[str]) -> list[str]:
+    child_argv: list[str] = []
+    prompt_separator_seen = False
+    for item in start_argv:
+        if item == "--":
+            prompt_separator_seen = True
+            child_argv.append(item)
+            continue
+        if not prompt_separator_seen and item == "--background":
+            continue
+        child_argv.append(item)
+    return child_argv
+
+
 def start_background(args: argparse.Namespace, cwd: Path, stdin_text: str, start_argv: list[str]) -> int:
+    # Background mode records the request first, then launches either a durable
+    # tmux runner or a detached subprocess to consume it.
     if args.stream is None:
         args.stream = True
     key, paths, session_id, requirements_present, include_diff, prompt, session_name, round_index = prepare_start(args, cwd, stdin_text)
     paths.metadata.parent.mkdir(parents=True, exist_ok=True)
-    child_argv = [item for item in start_argv if item != "--background"]
+    child_argv = background_child_argv(start_argv)
     if args.stream and "--stream" not in child_argv and "--no-stream" not in child_argv:
         child_argv.append("--stream")
     request = {
@@ -1446,10 +1470,7 @@ def start_background(args: argparse.Namespace, cwd: Path, stdin_text: str, start
         if not shutil.which("tmux"):
             update_metadata(paths.metadata, status="failed", completed_at=iso_now(), error="tmux not found")
             append_manager_log(manager_log, "failed", key=key, reason="tmux-not-found")
-            try:
-                request_path.unlink()
-            except OSError:
-                pass
+            unlink_silent(request_path)
             print("tmux not found for --background-launcher tmux", file=sys.stderr)
             return 1
         base_cmd = tmux_base_cmd(args.tmux_socket_name)
@@ -1463,10 +1484,7 @@ def start_background(args: argparse.Namespace, cwd: Path, stdin_text: str, start
                 error=manager.stderr.strip(),
             )
             append_manager_log(manager_log, "failed", key=key, reason="ensure-tmux-session", exit_code=manager.returncode)
-            try:
-                request_path.unlink()
-            except OSError:
-                pass
+            unlink_silent(request_path)
             sys.stderr.write(manager.stderr)
             return manager.returncode or 1
 
@@ -1520,13 +1538,10 @@ def start_background(args: argparse.Namespace, cwd: Path, stdin_text: str, start
                     error=launch.stderr.strip(),
                 )
                 append_manager_log(manager_log, "failed", key=key, reason="new-window", exit_code=launch.returncode)
-                try:
-                    request_path.unlink()
-                except OSError:
-                    pass
+                unlink_silent(request_path)
                 sys.stderr.write(launch.stderr)
                 return launch.returncode or 1
-            window_id, pane_id, pane_pid = (launch.stdout.strip().split("\t") + ["", "", ""])[:3]
+            window_id, pane_id, pane_pid = split_tsv_fields(launch.stdout, 3)
             append_manager_log(
                 manager_log,
                 "opened",
@@ -1555,18 +1570,18 @@ def start_background(args: argparse.Namespace, cwd: Path, stdin_text: str, start
         atomic_write_json(paths.request, request)
         update_metadata(paths.metadata, request_path=str(paths.request))
         worker_args = [sys.executable, str(Path(__file__).resolve()), "_worker", "--request-file", str(paths.request)]
-        stdout_file = paths.stdout_log.open("a", encoding="utf-8")
-        stderr_file = paths.stderr_log.open("a", encoding="utf-8")
-        proc = subprocess.Popen(
-            worker_args,
-            cwd=str(cwd),
-            stdin=subprocess.DEVNULL,
-            stdout=stdout_file,
-            stderr=stderr_file,
-            start_new_session=True,
-        )
-        stdout_file.close()
-        stderr_file.close()
+        with (
+            paths.stdout_log.open("a", encoding="utf-8") as stdout_file,
+            paths.stderr_log.open("a", encoding="utf-8") as stderr_file,
+        ):
+            proc = subprocess.Popen(
+                worker_args,
+                cwd=str(cwd),
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                start_new_session=True,
+            )
         update_metadata(paths.metadata, pid=proc.pid, launcher=launcher)
     payload = status_payload(read_json(paths.metadata))
     if args.json:
@@ -1647,10 +1662,10 @@ def execute_start(args: argparse.Namespace, cwd: Path, stdin_text: str) -> int:
         )
         return proc.returncode or 1
 
+    result = data.get("result")
     if args.json:
         print(json.dumps(data, indent=2, sort_keys=True))
     else:
-        result = data.get("result")
         if isinstance(result, str):
             print(result)
         else:
@@ -1658,8 +1673,8 @@ def execute_start(args: argparse.Namespace, cwd: Path, stdin_text: str) -> int:
 
     child_session_id = data.get("session_id")
     if proc.returncode == 0 and not data.get("is_error") and isinstance(child_session_id, str):
-        result = data.get("result") if isinstance(data.get("result"), str) else proc.stdout
-        write_text_atomic(paths.findings, result)
+        findings_text = result if isinstance(result, str) else proc.stdout
+        write_text_atomic(paths.findings, findings_text)
         update_metadata(
             paths.metadata,
             status="done",
@@ -1697,16 +1712,26 @@ def execute_start(args: argparse.Namespace, cwd: Path, stdin_text: str) -> int:
     return proc.returncode or 1
 
 
+# ---------------------------------------------------------------------------
+# Status and control commands
+# ---------------------------------------------------------------------------
+
 def load_key_metadata(store_dir: str, key: str) -> tuple[ReviewPaths, dict[str, Any]]:
     paths = review_paths(Path(store_dir), key)
     return paths, read_json(paths.metadata)
 
 
-def command_status(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Show persistent Claude review status.")
+def key_command_parser(description: str, *, json_flag: bool = False) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--key", required=True)
-    parser.add_argument("--store-dir", default="~/.claude/review-sessions")
-    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--store-dir", default=DEFAULT_STORE_DIR)
+    if json_flag:
+        parser.add_argument("--json", action="store_true")
+    return parser
+
+
+def command_status(argv: list[str]) -> int:
+    parser = key_command_parser("Show persistent Claude review status.", json_flag=True)
     args = parser.parse_args(argv)
     paths, metadata = load_key_metadata(args.store_dir, args.key)
     if not metadata:
@@ -1721,15 +1746,17 @@ def command_status(argv: list[str]) -> int:
 
 
 def command_result(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Print findings for a persistent Claude review.")
-    parser.add_argument("--key", required=True)
-    parser.add_argument("--store-dir", default="~/.claude/review-sessions")
+    parser = key_command_parser("Print findings for a persistent Claude review.")
     args = parser.parse_args(argv)
     paths, metadata = load_key_metadata(args.store_dir, args.key)
-    payload = status_payload(metadata) if metadata else {"status": "missing"}
+    payload = reconcile_status(paths, metadata) if metadata else {"status": "missing"}
     if payload.get("status") != "done":
         print(f"Review is not done: {payload.get('status')}", file=sys.stderr)
         return 1
+    return print_findings(paths, payload)
+
+
+def print_findings(paths: ReviewPaths, payload: dict[str, Any]) -> int:
     findings_path = Path(str(payload.get("findings_path") or paths.findings)).expanduser()
     if not findings_path.exists():
         print(f"Findings file missing: {findings_path}", file=sys.stderr)
@@ -1739,10 +1766,7 @@ def command_result(argv: list[str]) -> int:
 
 
 def command_check(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Check a persistent Claude review once without waiting.")
-    parser.add_argument("--key", required=True)
-    parser.add_argument("--store-dir", default="~/.claude/review-sessions")
-    parser.add_argument("--json", action="store_true")
+    parser = key_command_parser("Check a persistent Claude review once without waiting.", json_flag=True)
     parser.add_argument("--result", action="store_true", help="Print findings instead of status when the review is done.")
     args = parser.parse_args(argv)
 
@@ -1753,11 +1777,7 @@ def command_check(argv: list[str]) -> int:
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     elif args.result and status == "done":
-        findings_path = Path(str(payload.get("findings_path") or paths.findings)).expanduser()
-        if not findings_path.exists():
-            print(f"Findings file missing: {findings_path}", file=sys.stderr)
-            return 1
-        print(findings_path.read_text(encoding="utf-8"), end="")
+        return print_findings(paths, payload)
     else:
         print(status)
 
@@ -1766,27 +1786,6 @@ def command_check(argv: list[str]) -> int:
     if status in TERMINAL_STATUSES or status == "missing":
         return 1
     return 2
-
-
-def command_manager_event(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description=argparse.SUPPRESS)
-    parser.add_argument("--log-path", required=True)
-    parser.add_argument("--event", required=True)
-    parser.add_argument("--field", action="append", default=[])
-    parser.add_argument("--exit-status")
-    args = parser.parse_args(argv)
-
-    fields: dict[str, Any] = {}
-    for field in args.field:
-        if "=" not in field:
-            continue
-        name, value = field.split("=", 1)
-        if name:
-            fields[name] = value
-    if args.exit_status is not None:
-        fields["exit"] = args.exit_status
-    append_manager_log(Path(args.log_path), args.event, **fields)
-    return 0
 
 
 def terminate_pid(pid: Any) -> None:
@@ -1803,10 +1802,7 @@ def terminate_pid(pid: Any) -> None:
 
 
 def command_cancel(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Cancel a persistent Claude review.")
-    parser.add_argument("--key", required=True)
-    parser.add_argument("--store-dir", default="~/.claude/review-sessions")
-    parser.add_argument("--json", action="store_true")
+    parser = key_command_parser("Cancel a persistent Claude review.", json_flag=True)
     args = parser.parse_args(argv)
     paths, metadata = load_key_metadata(args.store_dir, args.key)
     if not metadata:
@@ -1835,6 +1831,7 @@ def command_cancel(argv: list[str]) -> int:
             capture_output=True,
             check=False,
         )
+        terminate_pid(metadata.get("claude_pid"))
         if isinstance(manager_log_path, str) and manager_log_path:
             append_manager_log(
                 Path(manager_log_path),
@@ -1864,15 +1861,14 @@ def command_cancel(argv: list[str]) -> int:
 
 
 def command_wait(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Wait for a persistent Claude review to finish.")
-    parser.add_argument("--key", required=True)
-    parser.add_argument("--store-dir", default="~/.claude/review-sessions")
+    parser = key_command_parser("Wait for a persistent Claude review to finish.", json_flag=True)
     parser.add_argument("--poll-seconds", type=int, default=5)
     parser.add_argument("--timeout-seconds", type=int, default=0)
-    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--stalled-grace-polls", type=int, default=1, help="Consecutive stalled polls to tolerate before exiting 2.")
     args = parser.parse_args(argv)
     deadline = epoch_seconds() + args.timeout_seconds if args.timeout_seconds else None
     last_status = None
+    stalled_polls = 0
     while True:
         paths, metadata = load_key_metadata(args.store_dir, args.key)
         payload = reconcile_status(paths, metadata) if metadata else {"key": safe_key(args.key), "status": "missing", "store_path": str(paths.metadata)}
@@ -1885,14 +1881,22 @@ def command_wait(argv: list[str]) -> int:
                 print(json.dumps(payload, indent=2, sort_keys=True))
             return 0 if status == "done" else 1
         if status == "stalled":
-            if args.json:
-                print(json.dumps(payload, indent=2, sort_keys=True))
-            return 2
+            stalled_polls += 1
+            if stalled_polls > max(0, args.stalled_grace_polls):
+                if args.json:
+                    print(json.dumps(payload, indent=2, sort_keys=True))
+                return 2
+        else:
+            stalled_polls = 0
         if deadline and epoch_seconds() >= deadline:
             print("wait-timeout", file=sys.stderr)
             return 2
         time.sleep(max(1, args.poll_seconds))
 
+
+# ---------------------------------------------------------------------------
+# Worker and runner commands
+# ---------------------------------------------------------------------------
 
 def command_worker(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=argparse.SUPPRESS)
@@ -1909,10 +1913,7 @@ def command_worker(argv: list[str]) -> int:
     try:
         return execute_start(start_args, cwd, stdin_text)
     finally:
-        try:
-            request_path.unlink()
-        except OSError:
-            pass
+        unlink_silent(request_path)
 
 
 def write_terminal_bytes(stream: Any, data: bytes) -> None:
@@ -1926,6 +1927,8 @@ def write_terminal_bytes(stream: Any, data: bytes) -> None:
 
 
 def tee_worker_request(request_path: Path, request: dict[str, Any]) -> int:
+    # Tmux runners use this path so panes stay useful: output is streamed to
+    # the visible terminal and appended to durable logs.
     key = safe_key(str(request.get("key") or request_path.stem))
     store_dir = Path(str(request.get("store_dir") or request_path.parent.parent)).expanduser()
     paths = review_paths(store_dir, key)
@@ -1953,10 +1956,7 @@ def tee_worker_request(request_path: Path, request: dict[str, Any]) -> int:
             exit_code=1,
             error=message.strip(),
         )
-        try:
-            request_path.unlink()
-        except OSError:
-            pass
+        unlink_silent(request_path)
         return 1
 
     streams: dict[int, tuple[Any, Any, Any]] = {}
@@ -1995,6 +1995,8 @@ def tee_worker_request(request_path: Path, request: dict[str, Any]) -> int:
 
 
 def command_runner(argv: list[str]) -> int:
+    # One runner owns one review key queue, preserving a stable tmux window
+    # across follow-up rounds while the underlying Claude sessions persist.
     parser = argparse.ArgumentParser(description=argparse.SUPPRESS)
     parser.add_argument("--queue-dir", required=True)
     parser.add_argument("--key", required=True)
@@ -2075,6 +2077,10 @@ def command_runner(argv: list[str]) -> int:
         time.sleep(0.2)
 
 
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "start":
@@ -2089,8 +2095,6 @@ def main(argv: list[str] | None = None) -> int:
         return command_check(argv[1:])
     elif argv and argv[0] == "cancel":
         return command_cancel(argv[1:])
-    elif argv and argv[0] == "_manager_event":
-        return command_manager_event(argv[1:])
     elif argv and argv[0] == "_worker":
         return command_worker(argv[1:])
     elif argv and argv[0] == "_runner":

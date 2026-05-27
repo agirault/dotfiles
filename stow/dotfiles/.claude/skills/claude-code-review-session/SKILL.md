@@ -1,166 +1,120 @@
 ---
 name: claude-code-review-session
-description: Use when an agent should ask Claude Code for code review, bug-finding, or a second opinion while preserving a reusable Claude Code session across follow-up requests.
+description: Persistent Claude Code review companion for independent code and design critique. Use when an agent needs code review, bug-finding, architecture critique, requirement conformance checks, or iterative follow-up review while preserving reviewer context.
+metadata:
+  author: Alexis Girault <agirault@nvidia.com>
+  tags:
+    - claude-code
+    - code-review
+    - agents
+    - tmux
+  domain: developer-tools
 ---
 
 # Claude Code Review Session
 
-Use a nested Claude Code process as a persistent reviewer. Prefer the bundled script instead of hand-writing `claude -p` commands; it handles JSON/stream parsing, named session storage, stale-session fallback, prompt-over-stdin, read-only file inspection, and optional git diff capture.
+Use the bundled script as a persistent, read-only Claude Code reviewer. Resolve `scripts/claude_review_session.py` relative to this skill directory; do not assume the skill is installed under `.claude`, `.agents`, or `.codex`.
+
+For continuous implementation workflows with plan/design/code review gates, use the higher-level `claude-reviewed-development-loop` skill and call this skill as the review primitive.
+
+## Path Setup
+When this skill is loaded, set `skill_dir` to the parent directory of the loaded `SKILL.md`, then run:
+
+```bash
+review_script="${skill_dir%/}/scripts/claude_review_session.py"
+```
+
+Use `$review_script` in commands. Do not locate this skill by searching home-directory roots or assuming a particular agent's install layout.
+
+## Boundary
+This is a reviewer companion, not a general-purpose subagent. Default child Claude constraints:
+- Persona: code reviewer, bug finder, or design reviewer.
+- Tools: `Read,Grep,Glob,LS` only, enforced by the script with `--tools`, `--allowedTools`, and `--permission-mode dontAsk`.
+- No edits, shell commands, slash commands, skills, nested agents, or external agents.
+- Working directory: same cwd as the caller.
+
+Do not use this skill when the child Claude should implement changes, run commands, mutate files, or operate as an autonomous worker. That needs a separate tool surface with explicit write permissions, sandbox/worktree policy, and cancellation semantics.
 
 ## Quick Start
-
-From the repo being reviewed:
-
-```bash
-python ~/.claude/skills/claude-code-review-session/scripts/claude_review_session.py \
-  start \
-  --key current-work \
-  --new \
-  --background \
-  "Review the current changes for correctness bugs. Findings only."
-```
-
-Check status and read findings:
+From the repo being reviewed, run:
 
 ```bash
-python ~/.claude/skills/claude-code-review-session/scripts/claude_review_session.py \
-  check \
-  --json \
-  --key current-work
-
-python ~/.claude/skills/claude-code-review-session/scripts/claude_review_session.py \
-  result \
-  --key current-work
+python "$review_script" start --key current-work --new --background "Review the current changes for correctness bugs. Findings only."
+python "$review_script" check --key current-work --json
+python "$review_script" result --key current-work
 ```
 
-Cancel a running review:
+Cancel with `python "$review_script" cancel --key current-work`. Run `python "$review_script" start --help` for all flags.
 
-```bash
-python ~/.claude/skills/claude-code-review-session/scripts/claude_review_session.py \
-  cancel \
-  --key current-work
-```
+Foreground use is supported by omitting `--background`, but prefer background mode for substantial reviews so the caller can poll, cancel, and recover by key.
 
-Foreground use is still supported by omitting `start --background`, but prefer background mode for substantial reviews so the parent can cancel, poll, and recover by key. The script stores metadata, logs, and findings in `~/.claude/review-sessions/`.
+## Review Thread
 
-## Review Shape
+Use this loop for one persistent Claude review thread. For broader milestone-by-milestone development orchestration, use `claude-reviewed-development-loop`.
 
-- Use `--mode implementation` for normal code review. This is the default.
-- Use `--mode adversarial` for architecture, large refactors, design proposals, migrations, and boundary/invariant reviews.
-- Add `--requirements "..."` or `--requirements-file path/to/spec.md` when the reviewer should judge whether the change satisfies a stated ask. Do not ask for spec compliance without providing requirements.
-- Add `--system-extra "..."` for one-off reviewer emphasis instead of adding new modes.
+1. Choose a stable `--key` for the workstream.
+2. Start the first review with `start --background --new`.
+3. Prefer `--review-path path/to/file` over pasting whole files; the reviewer can inspect paths with read-only tools.
+4. Use `check`, `status`, and `result` for lifecycle state. Do not infer liveness from progress text.
+5. Address valid findings locally; ignore or rebut invalid findings with concrete reasons.
+6. Send follow-up prompts with the same `--key`; the stored Claude session resumes automatically. Add `--diff` when the follow-up must include fresh git context.
+7. Repeat the back-and-forth until Claude reports no actionable findings or only an explicit disagreement remains.
 
-Examples:
+`--max-rounds` defaults to `3`. If disagreement remains at the cap, summarize both positions and ask the human to choose. Use `--max-rounds 0` only when the human explicitly wants an unbounded loop.
 
-```bash
-python ~/.claude/skills/claude-code-review-session/scripts/claude_review_session.py \
-  --key design-review \
-  --new \
-  --mode adversarial \
-  --requirements-file docs/proposal.md \
-  "Review this design before implementation."
-```
+## Inputs
+- First round includes `git status --short` and `git diff HEAD` unless disabled. Passing `--diff` on the first round is equivalent to the default and does not duplicate the diff. Follow-up rounds omit git context by default because Claude resumes the stored session; pass `--diff` to include current status and diff again.
+- Use `--base origin/main`, `--path <pathspec>`, and `--review-path <file-or-dir>` to focus context.
+- Use `--requirements "..."` or `--requirements-file spec.md` for requirement conformance checks; do not ask for spec compliance without providing the spec.
+- Use `--mode implementation` for normal review, `--mode adversarial` for architecture/migration/risk review, and `--system-extra "..."` for one-off emphasis.
+- Use `--model opus` for unusually complex design reasoning; default `sonnet` is the cost/latency balance. Use full model names when reproducibility matters.
+- Use `--budget <amount>` only for hard spend caps; too-low caps can abort before useful findings.
+- Use `--tools none` only when all review context is supplied directly in the prompt; it disables path inspection.
+- Use `--max-diff-bytes 0` for no wrapper diff truncation, and `--git-timeout-seconds <n>` when git context capture is slow or unreliable.
+- If context is truncated or narrowed, say so in the prompt and ask Claude for best effort on partial context.
 
-## Workflow
+## Background Tmux
+`--background-launcher auto` uses tmux when available and falls back to `subprocess` when tmux is unavailable. Use `--background-launcher subprocess` explicitly only in shells where children survive parent exit.
 
-1. Choose a stable `--key` for the workstream, such as branch name, issue id, or `repo-feature`.
-2. Use `start --background --new` for the first review unless the caller explicitly wants foreground blocking. By default, the script includes `git status --short` and `git diff HEAD`.
-3. Prefer passing relevant files with `--review-path path/to/file` instead of pasting whole files. The default tool policy allows only `Read,Grep,Glob,LS`.
-4. Use `check`, `status`, and `result` to monitor and collect findings. Do not infer liveness from vague progress text.
-5. Use `cancel --key <key>` instead of trying to interrupt a foreground shell pipeline.
-6. Use the same `--key` for follow-ups. Existing sessions resume automatically and do not resend the diff unless `--diff` is passed.
-7. Pass `--base origin/main` when reviewing a branch against its merge base target.
-8. Pass `--model opus` for complex design reasoning or `--model sonnet` for the default cost/latency balance. Use full model names when reproducibility matters.
-9. Pass `--budget <amount>` only when you need a hard spend cap; too-low caps can abort before Claude emits a useful response.
-10. Pass `--max-rounds 0` only when the human explicitly wants an unbounded review loop.
+Tmux mode creates a visible manager session, default `claude-review`. Attach with `tmux attach -t claude-review`. Inside it:
+- `manager` tails the manager log.
+- Each review key gets one lightweight runner window named `review-<key>`.
+- The runner owns a per-key queue, launches `claude -p` for each round, streams output into the pane, and appends durable logs.
 
-## Background Launcher
+Useful flags: `--tmux-session <name>`, `--tmux-runner-idle-seconds <n>` (default `300`; `0` exits immediately; negative never exits), `--tmux-keep-window`, and `--tmux-socket-name <name>` only when intentionally hiding from normal `tmux ls`.
 
-`--background-launcher auto` is the default. It uses `tmux` when available because managed exec harnesses can kill ordinary child processes after the parent command exits.
+Use `--no-stream` only when older single-result JSON behavior is required.
 
-By default, background jobs use Claude `stream-json` so the wrapper can record Claude activity separately from wrapper heartbeat. Tmux jobs use the normal tmux server and a single visible manager session named `claude-review`. This makes review activity discoverable with `tmux ls`; attach with `tmux attach -t claude-review`.
+## Lifecycle
+Default metadata/log store is `~/.claude/review-sessions/`; override with `--store-dir` when packaging or testing elsewhere. Files include `<key>.json`, `<key>.findings.md`, stdout/stderr logs, stream JSONL, and transient `<key>.queue/`.
 
-Tmux mode uses one lightweight runner window per review key, named `review-<key>`. The runner owns a small request queue for that key, launches `claude -p` for each queued round, streams stdout/stderr into the pane, and appends the same output to durable logs under `~/.claude/review-sessions/`. This keeps a stable window/name across follow-up rounds while preserving structured Claude JSON output for status and results. The persistent `manager` window tails `~/.claude/review-sessions/claude-review.manager.log` and records triggered/queued/opened/reused/closed/cancelled/failed/runner-exit events for audit.
+Claude Code transcripts use Claude Code's normal project history for the review cwd; wrapper metadata/logs live in `--store-dir`. Child session names default to `review-<key>` and may be prefixed from caller context; override with `--session-name-prefix` or disable with `--no-session-name-prefix` for audit control.
 
-- Use `--tmux-session <name>` to choose a different visible manager session.
-- Use `--background-launcher subprocess` only in a normal shell where child processes survive parent exit.
-- Use `--background-launcher tmux --tmux-socket-name <name>` only when you intentionally want an isolated tmux server instead of visibility in normal `tmux ls`.
-- Use `--tmux-runner-idle-seconds <n>` to control per-key runner persistence after the queue drains. Default is `300`; `0` exits immediately after a round; negative values keep the runner indefinitely.
-- Use `--tmux-keep-window` when you explicitly want the per-key runner to stay open indefinitely for manual inspection.
-- Use `--no-stream` only when you need the older single-result JSON behavior.
-- Use `cancel --key <key>` to kill only that review window; it leaves the manager session and other review windows alone.
+Statuses: `done`, `running`, `stalled`, `failed`, `timeout`, `crashed`, `cancelled`, `missing`.
 
-## Lifecycle Criteria
+Command behavior:
+- `check --key <key> --json`: one-shot state; exits `0` done, `1` terminal failure/missing, `2` running/stalled.
+- `check --key <key> --result`: prints findings when done; otherwise prints status and exits nonzero.
+- `result --key <key>`: prints findings only when done; otherwise exits nonzero with an error on stderr.
+- `status --key <key> --json`: one-shot liveness; exits `0` for running/stalled/done/cancelled, `1` for failure/missing.
+- `wait --key <key>`: blocking loop; exits `0` done, `1` terminal failure/missing, `2` repeated stalled state or wait timeout.
+- `cancel --key <key>`: kills only that review key's runner/window or process and purges queued requests.
 
-The metadata file is `~/.claude/review-sessions/<key>.json`; findings live beside it as `<key>.findings.md`.
+## Monitoring
+Prefer nonblocking monitoring after `start --background`. Use `check --json` in an external timer, harness loop, or callback mechanism when available; use `wait` only when the parent agent cannot do other work.
 
-- `done`: `status == done`, `exit_code == 0`, and `findings_path` exists.
-- `failed`: `status == failed`; inspect stderr log and metadata errors.
-- `timeout`: `status == timeout`; the wrapper killed the child Claude process after `--timeout-seconds`.
-- `cancelled`: review was explicitly cancelled with `cancel --key`.
-- `alive`: `status == running`, heartbeat is fresh, and `pid` is alive.
-- `streaming-active`: `claude_activity == streaming-active`; Claude emitted a stream event within the stale threshold.
-- `streaming-quiet`: `claude_activity == streaming-quiet`; wrapper/process is alive, but Claude has not emitted a stream event recently. This also reports `status == stalled`.
-- `streaming-no-events`: `claude_activity == streaming-no-events`; wrapper/process is alive, but no Claude stream event has been seen yet. If this persists beyond the stale threshold, it also reports `status == stalled`.
-- `stalled`: status command reports `stalled`; either the wrapper heartbeat is stale while `pid` is alive, or streaming is enabled and Claude activity is stale.
-- `crashed`: status command reports `crashed`; heartbeat is stale and `pid` is dead.
+Polling policy:
+- Poll `check --key <key> --json` every 15-30 seconds, or use the harness' scheduled loop feature if one exists.
+- `check` is the completion gate: exit `0` means collect `result`, exit `1` means terminal failure/missing/cancelled, exit `2` means keep monitoring or inspect stalled state.
+- For `check`, `--json` takes precedence over `--result`; omit `--json` when you want findings printed directly.
+- `status` is for liveness diagnostics and dashboards; it intentionally exits `0` for `running`, `stalled`, and `done` so it is not a completion gate.
+- If status is `stalled`, inspect `claude_activity`, `heartbeat_age_seconds`, `claude_event_age_seconds`, stderr, and the manager log before cancelling.
+- Cancel only when the review is clearly unwanted, the user asked to stop it, the process is `crashed`, or `stalled` persists across at least two polls beyond `stale_after_seconds` with no new Claude events or useful output.
 
-`wait` exits `0` for `done`, `1` for terminal failure states (`failed`, `timeout`, `crashed`, `cancelled`, `missing`), and `2` for `stalled` or wait timeout.
+An external timer cannot wake an already-running agent turn unless the harness supports callbacks. If the harness has a `/loop` or equivalent, schedule it to run `check --json` and surface completion, terminal failure, or repeated stalled state.
 
-Prefer nonblocking monitoring when the parent agent can do other work:
-
-- `check --key <key> --json`: one-shot completion check. Exits `0` for `done`, `1` for terminal failure or missing metadata, and `2` for running or stalled. It never sleeps.
-- `check --key <key> --result`: prints findings and exits `0` if done; otherwise prints status and exits nonzero.
-- `status --key <key> --json`: one-shot liveness snapshot. Exits `0` for running, stalled, or done; exits `1` for failure/missing states.
-- `wait --key <key>`: blocking sleep loop. Use only when the parent agent is truly blocked on the review result, preferably with a bounded `--timeout-seconds`.
-
-If the calling harness has a loop or scheduled command mechanism, point it at `check --json` or the manager log. The wrapper writes callback-friendly state to the metadata JSON and to `<tmux-session>.manager.log`, but an external process cannot directly wake an already-running LLM turn unless that harness provides its own callback channel.
-
-Streaming metadata:
-
-- `last_heartbeat_at`: wrapper heartbeat. This only proves the wrapper loop is alive.
-- `last_claude_event_at`: most recent Claude stream event.
-- `last_partial_text_at`: most recent user-visible text delta, when Claude emits one.
-- `claude_event_count`: number of parsed Claude stream events.
-- `stream_log_path`: raw Claude stream JSONL audit log.
-
-## Context Limits
-
-Do not silently truncate review input. Send complete relevant files or complete diffs whenever feasible. If context must be bounded, prefer narrowing scope with `--path`, a smaller `--base`, or a targeted prompt. If truncation is unavoidable, make it explicit in the prompt and ask Claude for best effort on partial context.
-
-The default child Claude tool policy is read-only: `Read,Grep,Glob,LS`. This allows path-based review without paste-heavy prompts, while still preventing edits, shell commands, nested agents, and skill invocation. Use `--tools none` only when the child must receive all context directly in the prompt.
-
-The wrapper's diff capture uses `--max-diff-bytes` and inserts a visible truncation marker. Use `--max-diff-bytes 0` for no diff truncation, and `--git-timeout-seconds` if git commands are slow or unreliable in the current workspace.
-
-Default diff capture is `git diff HEAD`, which covers uncommitted work. For committed branch review, pass an explicit merge target such as `--base origin/main`.
-
-## Review Loop
-
-Default expectation after invoking this skill:
-
-1. Send the work for review.
-2. Read findings and decide which are valid.
-3. Address valid findings locally; ignore or rebut invalid findings with a concrete reason.
-4. Send a follow-up in the same `--key` session summarizing what changed and any rebuttals.
-5. Repeat until Claude reports no actionable findings or only disagreements remain.
-
-The script tracks `round_index` in metadata and blocks rounds above `--max-rounds` (default `3`). If there is still disagreement, summarize both positions and ask the human to choose, unless the human explicitly requested an unbounded review loop and you pass `--max-rounds 0`.
+## Safety
+The child Claude runs as the current user in the same cwd. The safety boundary is Claude Code's tool/permission policy, not the parent agent's sandbox. Keep the default read-only policy for review; do not add write or shell tools to this skill. The wrapper disables slash commands to avoid recursion and hidden workflows. If a stored Claude session cannot be resumed, the script starts fresh and includes current diff context again. For cloud-hosted multi-agent review, use `claude ultrareview` if available.
 
 ## Validation
-
-After changing the wrapper, run:
-
-```bash
-python -m unittest discover -s ~/.claude/skills/claude-code-review-session/tests
-```
-
-The tests import the script relative to the skill directory and use a fake Claude binary for background lifecycle coverage, so they do not depend on a username, checkout path, active symlink location, network, or model access.
-
-## Notes
-
-- The child Claude process runs with only read-only file tools by default and slash commands disabled. This prevents edits, shell commands, and recursive skill invocation when Claude Code itself uses this skill.
-- The child Claude process runs in the same working directory as the caller. Claude Code transcripts are therefore created under that workspace's Claude project history, while the wrapper's key-to-session files live in `~/.claude/review-sessions/`.
-- Child session names are `review-<key>` by default. The script prefixes them with caller context when available (`CLAUDE_SESSION_NAME`, `CLAUDE_CODE_SESSION_NAME`, `CODEX_SESSION_NAME`, `CODEX_THREAD_ID`, or `CLAUDE_SESSION_ID`). Override with `--session-name-prefix` or disable with `--no-session-name-prefix`.
-- If a stored session was cleaned up or cannot be resumed, the script starts a fresh session and includes the current diff again.
-- For cloud multi-agent review, use Claude Code's built-in `claude ultrareview`; this skill is for local, persistent `claude -p` review threads.
-- Run the script with `--help` for all flags.
+When changing this skill, read `VALIDATE.md` and run its checks before claiming completion. See `README.md` for human-facing architecture and upstream packaging notes.

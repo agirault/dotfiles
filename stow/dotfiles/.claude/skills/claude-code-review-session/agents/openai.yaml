@@ -1,4 +1,4 @@
 interface:
   display_name: "Claude Code Review Session"
-  short_description: "Persistent Claude Code review threads"
-  default_prompt: "Use $claude-code-review-session to get a persistent Claude Code review of my current changes."
+  short_description: "Persistent read-only Claude Code reviewer"
+  default_prompt: "Use $claude-code-review-session to review my current changes under a stable key; reuse that key for follow-up rounds so the same Claude reviewer keeps context."

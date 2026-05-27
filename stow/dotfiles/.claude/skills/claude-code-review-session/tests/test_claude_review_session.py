@@ -180,11 +180,9 @@ class ClaudeReviewSessionTests(unittest.TestCase):
         self.assertLessEqual(len(second), 120)
         self.assertNotEqual(first, second)
 
-    def test_tmux_window_name_includes_round_index_when_available(self):
+    def test_tmux_window_name_is_stable_per_key(self):
         self.assertEqual(mod.tmux_window_name("feature/key"), "review-feature-key")
-        self.assertEqual(mod.tmux_window_name("feature/key", 0), "review-feature-key-r0")
-        self.assertEqual(mod.tmux_window_name("feature/key", 3), "review-feature-key-r3")
-        self.assertLessEqual(len(mod.tmux_window_name("long-key-" * 20, 42)), 80)
+        self.assertLessEqual(len(mod.tmux_window_name("long-key-" * 20)), 80)
 
     def test_claude_command_defaults_to_read_only_tools_and_names_session(self):
         command = mod.claude_command(
@@ -431,38 +429,12 @@ class ClaudeReviewSessionTests(unittest.TestCase):
 
         self.assertNotIn("sh -l", manager)
         self.assertNotIn("source", manager)
+        self.assertIn("--noprofile", manager)
+        self.assertIn("--norc", manager)
         self.assertIn("Claude review manager", manager)
         self.assertIn("Manager log: /tmp/reviews/claude-review.manager.log", manager)
         self.assertIn("%s\\n", manager)
         self.assertIn("tail -n 200 -F /tmp/reviews/claude-review.manager.log", manager)
-
-        paths = mod.review_paths(Path("/tmp/reviews"), "feature/key")
-        worker = mod.tmux_worker_command(
-            ["python", "worker.py"],
-            paths,
-            "feature/key",
-            keep_window=True,
-            manager_log=Path("/tmp/reviews/manager.log"),
-            round_index=2,
-            window_name="review-feature-key-r2",
-        )
-
-        self.assertIn("Claude review key=feature-key", worker)
-        self.assertIn("stdout log: /tmp/reviews/feature-key.stdout.log", worker)
-        self.assertIn("stderr log: /tmp/reviews/feature-key.stderr.log", worker)
-        self.assertTrue(worker.startswith("bash --noprofile --norc -lc "))
-        self.assertIn("python worker.py 2> >(tee -a /tmp/reviews/feature-key.stderr.log >&2)", worker)
-        self.assertIn("| tee -a /tmp/reviews/feature-key.stdout.log", worker)
-        self.assertIn("Claude review finished with exit=", worker)
-        self.assertIn("_manager_event", worker)
-        self.assertIn("--event closed", worker)
-        self.assertIn("--field round_index=2", worker)
-        self.assertIn("--field window_name=review-feature-key-r2", worker)
-        self.assertIn("exec bash --noprofile --norc", worker)
-
-        close_worker = mod.tmux_worker_command(["python", "worker.py"], paths, "feature/key", keep_window=False)
-        self.assertIn("exit $status", close_worker)
-        self.assertNotIn("exec bash --noprofile --norc", close_worker)
 
     def test_start_parser_supports_background_lifecycle_flags(self):
         parsed = mod.parse_start_args(
@@ -495,6 +467,54 @@ class ClaudeReviewSessionTests(unittest.TestCase):
         self.assertIsNone(parsed.stream)
         self.assertFalse(parsed.tmux_keep_window)
         self.assertEqual(parsed.prompt, ["Review this."])
+
+    def test_background_child_argv_preserves_prompt_after_separator(self):
+        child_argv = mod.background_child_argv(
+            [
+                "--key",
+                "review-key",
+                "--background",
+                "--",
+                "--background",
+                "is literal prompt text",
+            ]
+        )
+
+        self.assertEqual(
+            child_argv,
+            [
+                "--key",
+                "review-key",
+                "--",
+                "--background",
+                "is literal prompt text",
+            ],
+        )
+
+    def test_run_claude_removes_prompt_tmp_when_popen_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for stream in (False, True):
+                with self.subTest(stream=stream):
+                    paths = mod.review_paths(Path(tmpdir), f"missing-claude-{stream}")
+                    run_args = args(
+                        claude_bin=str(Path(tmpdir) / "missing-claude"),
+                        heartbeat_seconds=30,
+                        timeout_seconds=0,
+                        stream=stream,
+                    )
+
+                    with self.assertRaises(OSError):
+                        mod.run_claude(
+                            run_args,
+                            Path(tmpdir),
+                            f"missing-claude-{stream}",
+                            None,
+                            "Review this.",
+                            False,
+                            paths,
+                        )
+
+                    self.assertEqual(list(Path(tmpdir).glob("*.prompt.tmp")), [])
 
     def test_background_lifecycle_with_fake_claude(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1836,6 +1856,41 @@ class ClaudeReviewSessionTests(unittest.TestCase):
             persisted = json.loads(metadata.read_text(encoding="utf-8"))
             self.assertEqual(persisted["status"], "stalled")
 
+    def test_result_reconciles_stale_running_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old = mod.iso_from_epoch(mod.epoch_seconds() - 120)
+            mod.atomic_write_json(
+                Path(tmpdir) / "crashed-result.json",
+                {
+                    "key": "crashed-result",
+                    "status": "running",
+                    "pid": 99999999,
+                    "last_heartbeat_at": old,
+                    "heartbeat_interval_seconds": 30,
+                },
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "result",
+                    "--key",
+                    "crashed-result",
+                    "--store-dir",
+                    tmpdir,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("Review is not done: crashed", result.stderr)
+            persisted = json.loads((Path(tmpdir) / "crashed-result.json").read_text(encoding="utf-8"))
+            self.assertEqual(persisted["status"], "crashed")
+
     def test_status_recovers_persisted_stalled_when_heartbeat_is_fresh(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             metadata = Path(tmpdir) / "recover-worker.json"
@@ -1872,6 +1927,42 @@ class ClaudeReviewSessionTests(unittest.TestCase):
             self.assertEqual(payload["status"], "running")
             persisted = json.loads(metadata.read_text(encoding="utf-8"))
             self.assertEqual(persisted["status"], "running")
+
+    def test_wait_tolerates_one_stalled_poll_by_default(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            metadata = Path(tmpdir) / "stalled-wait.json"
+            old = mod.iso_from_epoch(mod.epoch_seconds() - 120)
+            mod.atomic_write_json(
+                metadata,
+                {
+                    "key": "stalled-wait",
+                    "status": "stalled",
+                    "pid": os.getpid(),
+                    "last_heartbeat_at": old,
+                    "heartbeat_interval_seconds": 30,
+                },
+            )
+            sleeps = []
+            original_sleep = mod.time.sleep
+            try:
+                mod.time.sleep = lambda seconds: sleeps.append(seconds)
+                with redirect_stdout(io.StringIO()) as stdout:
+                    result = mod.command_wait(
+                        [
+                            "--key",
+                            "stalled-wait",
+                            "--store-dir",
+                            tmpdir,
+                            "--poll-seconds",
+                            "1",
+                        ]
+                    )
+            finally:
+                mod.time.sleep = original_sleep
+
+            self.assertEqual(result, 2)
+            self.assertEqual(stdout.getvalue().strip(), "stalled")
+            self.assertEqual(sleeps, [1])
 
     def test_check_is_nonblocking_and_uses_completion_exit_codes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1998,6 +2089,39 @@ class ClaudeReviewSessionTests(unittest.TestCase):
             self.assertEqual(cancel.returncode, 0, cancel.stderr)
             self.assertEqual(cancel.stdout.strip(), "cancelled")
             self.assertEqual(list(queue_dir.iterdir()), [])
+
+    def test_cancel_tmux_metadata_terminates_recorded_claude_pid(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mod.atomic_write_json(
+                Path(tmpdir) / "tmux-cancel.json",
+                {
+                    "key": "tmux-cancel",
+                    "status": "running",
+                    "tmux_window_id": "%not-a-real-window",
+                    "claude_pid": 12345,
+                },
+            )
+            terminated = []
+            original_terminate_pid = mod.terminate_pid
+            original_run = mod.subprocess.run
+            try:
+                mod.terminate_pid = lambda pid: terminated.append(pid)
+                mod.subprocess.run = lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1, "", "")
+                with redirect_stdout(io.StringIO()):
+                    result = mod.command_cancel(
+                        [
+                            "--key",
+                            "tmux-cancel",
+                            "--store-dir",
+                            tmpdir,
+                        ]
+                    )
+            finally:
+                mod.terminate_pid = original_terminate_pid
+                mod.subprocess.run = original_run
+
+            self.assertEqual(result, 0)
+            self.assertEqual(terminated, [12345])
 
     def test_cancel_does_not_overwrite_terminal_status(self):
         with tempfile.TemporaryDirectory() as tmpdir:
