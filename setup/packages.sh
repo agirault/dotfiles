@@ -58,8 +58,9 @@ sudo apt-get install -y \
 # Binary-installed tools
 # Note: glab from snap has permission issues, from apt is too old
 command -v glab >/dev/null 2>&1 || {
+    glab_arch=$(dpkg --print-architecture)
     glab_version=$(curl -s https://gitlab.com/gitlab-org/cli/-/releases/permalink/latest | grep -oP 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-    curl -sL "https://gitlab.com/gitlab-org/cli/-/releases/${glab_version}/downloads/glab_${glab_version#v}_linux_amd64.tar.gz" | \
+    curl -sL "https://gitlab.com/gitlab-org/cli/-/releases/${glab_version}/downloads/glab_${glab_version#v}_linux_${glab_arch}.tar.gz" | \
         tar -xz -C /tmp bin/glab
     install /tmp/bin/glab "$HOME/.local/bin/glab"
     rm -rf /tmp/bin
