@@ -18,6 +18,38 @@ Instead: Write a script to `$TMPDIR/name.py`, run `python3 $TMPDIR/name.py`.
 - If precommit causes issues due to sandbox, attempt setting `PRE_COMMIT_HOME` to a path inside the sandbox.
 - Use `gh` for GitHub remote operations.
 - Use `glab` for GitLab remote operations.
+- If Git cannot write the repository metadata:
+  - First confirm the failure is a read-only `.git` issue. A normal linked worktree does not fix
+    this because its shared refs and administrative files still live under the original `.git`.
+  - Use one [`git-shadow`](https://github.com/dmahurin/git-shadow), a writable replacement for the
+    repository metadata that keeps the current worktree and borrows the original Git objects. The
+    canonical shadow consists of an `.aigit` Git-directory pointer and its `.aigit_` writable
+    common directory.
+    - If both canonical shadow paths already exist, reuse them. Never rerun the shadow script over an
+      existing shadow or create a new shadow for each task or linked worktree.
+    - Otherwise, from the main checkout only, run `mk-git-shadow .aigit`. The script expects `.git`
+      to be a directory, so do not run it from an existing linked worktree.
+    - In the original checkout, direct Git commands through `.aigit`. Create any additional linked
+      worktrees from that same shadow so their metadata and shared refs remain under `.aigit_`.
+    - Verify the selected repository with `git status`, `git rev-parse --git-dir`,
+      `git rev-parse --git-common-dir`, and `git worktree list`. Never commit the generated `.aigit`
+      pointer or `.aigit_` directory.
+  - Use a writable temporary mirror or clone only when a Git shadow cannot be used. Preserve dirty
+    and untracked changes explicitly before switching worktrees.
+
+## Testing
+
+- When adequate, failing test first, fix second.
+- Don't overindex on implementation details or values that have no strong guarantee of persisting. Cover the durable contract, based on intended behavior.
+
+## Public messaging
+
+- When commenting on a service (eg: Slack, Gitlab MR, Github issue) with an identify token I own (vs an agent-dedicated token), prepend your agentic name to the message and place the message in a quote like shown below. Exceptions include MR descriptions or messages I am drafting explicitly with you.
+```md
+<agent-name>:
+
+> <message>
+```
 
 ## Agentic workflow
 
@@ -54,3 +86,15 @@ Locations:
 When creating skills:
 - favor scripting when robustness is high, complexity tolerable, and/or when determinism is critical
 - resort to your inference of the one of adequate subagents only when inference is the only way to achieve this without resorting to fragile heuristics
+
+### Superpowers artifacts
+
+- Store Superpowers specs and plans outside repositories under
+  `~/superpowers/<project>/{specs,plans}/`.
+- Derive `<project>` from the primary Git remote repository name without the
+  `.git` suffix. Fall back to the repository-root directory name when no remote
+  exists.
+- Never create, stage, commit, or leave Superpowers specs or plans under
+  `docs/superpowers/` or elsewhere inside a repository.
+- Reference artifacts by their absolute external path when handing work to
+  another agent. Never copy them into a repository.
