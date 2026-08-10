@@ -1,34 +1,32 @@
 # Claude Code Review Session
 
-Persistent, read-only Claude Code reviewer for agent workflows.
+Human-facing inspection notes for the persistent Claude Code reviewer skill. Agent-facing usage lives in `SKILL.md`.
 
-This skill lets an agent ask Claude Code for an independent review, keep reviewer context across follow-up rounds, and expose the work through structured metadata plus visible tmux windows.
+## Inspecting Reviews
 
-## Scope
+Default wrapper state lives in `~/.claude/review-sessions/`.
 
-This is a reviewer companion, not a general-purpose subagent runner.
+For a review key such as `current-work`, useful files are:
 
-It is intentionally narrow:
+- `current-work.json` - lifecycle metadata, status, session id, tmux window id, and log paths.
+- `current-work.findings.md` - final review text returned by Claude.
+- `current-work.stdout.log` and `current-work.stderr.log` - durable process logs.
+- `current-work.stream.jsonl` - streaming Claude events when background streaming is enabled.
+- `current-work.queue/` - transient queued requests for tmux-backed background rounds.
 
-- Local `claude -p` wrapper with JSON or `stream-json` output.
-- Persistent review keys and Claude session IDs for follow-up rounds.
-- Read-only Claude Code tools: `Read,Grep,Glob,LS`.
-- No edits, shell commands, slash commands, skills, nested agents, or external agents.
-- Tmux-backed auditability: one manager session and one lightweight runner window per review key.
+When tmux is available, background reviews use the normal tmux server by default:
 
-General implementation work should be a separate skill or tool. A write-capable companion needs a different permission model, sandbox or worktree policy, and explicit tests for writes, shell commands, cancellation, and cleanup.
-
-Docs and tests should not assume an install root such as `.claude`, `.agents`, or `.codex`; use `<skill-dir>` or paths relative to the repository under test.
-
-## Architecture
-
-```text
-agent
-  -> SKILL.md guidance
-  -> scripts/claude_review_session.py
-      -> claude -p reviewer process
-      -> ~/.claude/review-sessions/ metadata, logs, findings, queues
-      -> optional tmux session: claude-review
+```bash
+tmux ls
+tmux attach -t claude-review
 ```
 
-The tmux runner is only a durable control and inspection surface. Claude still runs through `claude -p`, so the wrapper can parse structured output and maintain reliable lifecycle state.
+Inside `claude-review`, the `manager` window tails the manager log and each active review key uses a `review-<key>` runner window. Runner windows normally close after their idle timeout; durable logs remain in `~/.claude/review-sessions/`.
+
+Programmatic inspection:
+
+```bash
+python scripts/claude_review_session.py check --key current-work --json
+python scripts/claude_review_session.py result --key current-work
+python scripts/claude_review_session.py cancel --key current-work
+```

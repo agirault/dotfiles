@@ -8,7 +8,7 @@ import tempfile
 import time
 import unittest
 import io
-from contextlib import contextmanager, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -193,6 +193,8 @@ class ClaudeReviewSessionTests(unittest.TestCase):
         )
 
         self.assertIn("--disable-slash-commands", command)
+        self.assertIn("--strict-mcp-config", command)
+        self.assertEqual(command[command.index("--permission-mode") + 1], "dontAsk")
         self.assertEqual(command[command.index("--tools") + 1], "Read,Grep,Glob,LS")
         self.assertEqual(command[command.index("--allowedTools") + 1], "Read,Grep,Glob,LS")
         self.assertEqual(command[command.index("--name") + 1], "Parent-Session-review-feature-key")
@@ -219,6 +221,157 @@ class ClaudeReviewSessionTests(unittest.TestCase):
         self.assertEqual(stream[stream.index("--output-format") + 1], "stream-json")
         self.assertIn("--include-partial-messages", stream)
         self.assertIn("--verbose", stream)
+
+    def test_start_parser_rejects_arbitrary_child_tools(self):
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            mod.parse_start_args(["--tools", "Bash", "Review this."])
+
+    def test_start_parser_does_not_take_claude_bin_from_environment(self):
+        with patched_env(CLAUDE_BIN="/tmp/not-the-requested-claude"):
+            parsed = mod.parse_start_args(["Review this."])
+
+        self.assertEqual(parsed.claude_bin, "claude")
+
+    def test_resolve_claude_bin_requires_executable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            executable = tmp_path / "claude"
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+
+            self.assertEqual(mod.resolve_claude_bin(str(executable)), str(executable.resolve()))
+
+            not_executable = tmp_path / "not-claude"
+            not_executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+            with self.assertRaises(SystemExit):
+                mod.resolve_claude_bin(str(not_executable))
+
+            with self.assertRaises(SystemExit):
+                mod.resolve_claude_bin(str(tmp_path / "missing-claude"))
+
+    def test_system_extra_is_bounded_trusted_instruction(self):
+        with self.assertRaises(SystemExit):
+            mod.validate_system_extra(args(system_extra="x" * (mod.MAX_SYSTEM_EXTRA_BYTES + 1)))
+
+        with self.assertRaises(SystemExit):
+            mod.validate_system_extra(args(system_extra="trusted\x00instruction"))
+
+        mod.validate_system_extra(args(system_extra="Focus on API compatibility."))
+
+    def test_child_argv_sets_resolved_claude_bin_before_prompt_separator(self):
+        child_argv = mod.set_start_arg(
+            ["--key", "review-key", "--", "--claude-bin", "literal prompt"],
+            "--claude-bin",
+            "/usr/bin/claude",
+        )
+
+        self.assertEqual(
+            child_argv,
+            [
+                "--key",
+                "review-key",
+                "--claude-bin",
+                "/usr/bin/claude",
+                "--",
+                "--claude-bin",
+                "literal prompt",
+            ],
+        )
+
+    def test_read_only_noninteractive_warning_is_explicit(self):
+        with redirect_stderr(io.StringIO()) as stderr:
+            mod.warn_noninteractive_tools(args(tools="read-only"))
+
+        warning = stderr.getvalue()
+        self.assertIn("allowed", warning)
+        self.assertIn("file-inspection", warning)
+        self.assertIn("without confirmation", warning)
+        self.assertIn("sensitive", warning)
+
+        with redirect_stderr(io.StringIO()) as stderr:
+            mod.warn_noninteractive_tools(args(tools="none"))
+
+        self.assertEqual(stderr.getvalue(), "")
+
+        with redirect_stderr(io.StringIO()) as stderr:
+            mod.warn_noninteractive_tools(args(_suppress_noninteractive_warning=True))
+
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_dry_run_does_not_emit_noninteractive_warning(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_args = args(
+                diff=False,
+                dry_run=True,
+                heartbeat_seconds=30,
+                json=False,
+                key="dry-run",
+                max_rounds=3,
+                new=True,
+                no_diff=True,
+                session_id=None,
+                store_dir=tmpdir,
+                timeout_seconds=0,
+            )
+
+            with redirect_stdout(io.StringIO()) as stdout, redirect_stderr(io.StringIO()) as stderr:
+                status = mod.execute_start(run_args, Path(tmpdir), "")
+
+        self.assertEqual(status, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(json.loads(stdout.getvalue())["key"], "dry-run")
+
+    def test_worker_request_suppresses_duplicate_noninteractive_warning(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            fake_claude = tmp_path / "fake_claude.py"
+            fake_claude.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env python3",
+                        "import json, sys",
+                        "sys.stdin.read()",
+                        "print(json.dumps({",
+                        "  'type': 'result',",
+                        "  'subtype': 'success',",
+                        "  'is_error': False,",
+                        "  'result': 'fake-review-ok',",
+                        "  'session_id': 'fake-session',",
+                        "  'total_cost_usd': 0",
+                        "}))",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fake_claude.chmod(0o755)
+            request = {
+                "argv": [
+                    "--key",
+                    "worker-warning",
+                    "--store-dir",
+                    tmpdir,
+                    "--claude-bin",
+                    str(fake_claude),
+                    "--no-diff",
+                    "Review this.",
+                ],
+                "cwd": tmpdir,
+                "key": "worker-warning",
+                "round_index": 1,
+                "stdin_text": "",
+                "suppress_noninteractive_warning": True,
+            }
+            request_path = tmp_path / "request.json"
+            mod.atomic_write_json(request_path, request)
+
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as stderr:
+                status = mod.command_worker(["--request-file", str(request_path)])
+
+        self.assertEqual(status, 0)
+        self.assertNotIn("without confirmation", stderr.getvalue())
+        self.assertFalse(request_path.exists())
 
     def test_store_round_trip_is_json_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:

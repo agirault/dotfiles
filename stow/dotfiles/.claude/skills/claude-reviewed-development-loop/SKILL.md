@@ -1,6 +1,7 @@
 ---
 name: claude-reviewed-development-loop
-description: Use when doing multi-step implementation work that needs recurring independent review, plan adjustment, design critique, or autonomous milestone-by-milestone quality gates.
+description: Use when multi-step implementation needs recurring review, plan adjustment, or milestone quality gates.
+license: "Apache-2.0"
 metadata:
   author: Alexis Girault <agirault@nvidia.com>
   tags:
@@ -16,19 +17,43 @@ metadata:
 
 Use this as the parent-agent workflow for continuous implementation with recurring Claude review. Use `claude-code-review-session` as the review primitive; this skill decides when to call it and how to close each loop.
 
+## Purpose
+
+Keep multi-step implementation work moving through small verified milestones while repeatedly consulting a persistent Claude reviewer for plan, design, code, and disagreement checks.
+
+Use This Skill When
+
+- The task spans multiple implementation milestones and needs recurring review gates.
+- The plan or design may change as review findings arrive.
+- You need explicit policy for autonomy, commits, pushes, MR handling, and disagreement deadlocks.
+- You want to avoid a large unreviewed bring-up diff by verifying and reviewing each milestone.
+
+Do not use this skill for a single final branch readiness pass, a one-shot code review, or simple MR description cleanup. Stick to `claude-code-review-session` when only one persistent review thread is needed.
+
+## Prerequisites
+
+- `claude-code-review-session` available and loaded before running review commands.
+- Git worktree for local decision-log exclusion and diff-based review.
+- Test commands or validation steps known for the target project.
+- An authenticated API client only when push or MR handling is allowed.
+
 ## Flow
 
 ### Setup
 
-Load `claude-code-review-session` first. Resolve its `scripts/claude_review_session.py` wrapper from that skill's `SKILL.md` location, then choose one stable review key for the workstream unless the work naturally splits into independent branches of review.
+First, establish policy. Do nothing else first: no setup dirs, exclude edits, review starts, tests, code, commits, pushes, or MRs.
 
-Before starting, establish the operating policy from the user's wording. If any item is unclear, ask once:
-- Autonomy: fully autonomous, or ask the human before material plan/design changes and unresolved review disagreements?
-- Commits: commit verified milestones, or leave changes uncommitted? If commits are requested, verify you can do so in the repository. If not, confirm a workaround with the user, such as working in a worktree or local clone, or disabling signing.
-- Pushes: push after commits, push only when asked, or never push? If pushing is requested, verify you have the tools and permissions to do so (`glab`, `gh`, or an adequate MCP server with auth). Otherwise, tell the user so they can configure access or skip pushing.
-- Merge requests: if pushing is allowed and no MR exists, create one, ask first, or leave branch-only?
+Use structured user-input UI if available; if limited to 3 prompts, combine push+MR and follow up only when pushing is allowed. Otherwise ask once in plain text. Required answers:
+- Autonomy: autonomous, or ask before material plan/design changes and unresolved review disagreements?
+- Commits: commit verified milestones, or leave uncommitted?
+- Pushes: after commits, only when asked, or never?
+- MRs: if pushing and no MR exists, create one, ask first, or branch-only?
 
-Record the answers in the working plan. Never infer permission to commit or push from this skill alone.
+Record answers in the working plan. Never infer commit or push permission.
+
+If the harness exposes a task-list or plan-tracker UI, create the visible task list immediately after policy is set and before implementation or review work begins. Keep it updated as milestones start, complete, or change. The visible tracker is part of the working plan, not optional narration.
+
+Then load `claude-code-review-session`. Resolve its `scripts/claude_review_session.py` wrapper from that skill's `SKILL.md` location, then choose one stable review key for the workstream unless the work naturally splits into independent branches of review.
 
 Set shell variables and create a local-only decision log before the first nontrivial review:
 
@@ -46,6 +71,8 @@ decision_log=".agent-review-decisions/${review_key}.md"
 
 After the first successful `start` for a key, set `first_review_args=()` so later checkpoints resume the same Claude session. If using multiple review keys, keep separate `review_key`, `first_review_args`, and `decision_log` state for each key. This skill assumes a Git worktree; if `git rev-parse` fails, ask before choosing another local-only decision-log location.
 
+If the review wrapper refuses a follow-up because the key reached its default maximum round count, do not switch keys for the same workstream. Continue the same key only when appropriate by passing an explicit higher `--max-rounds` or `--max-rounds 0`, and record why continuing is still within the same review thread. Use a new key only for genuinely independent branches of review.
+
 Do not stage or commit `.agent-review-decisions/`. It is for local audit of unresolved disagreements, executive decisions, and review-loop rationale.
 
 ## Loop
@@ -59,7 +86,7 @@ Do not stage or commit `.agent-review-decisions/`. It is for local audit of unre
 7. Stay DRY: tighten the work to reduce obsolete code, AI slop, redundancy, and docs drift. Less is more.
 8. Commit each verified milestone only when the kickoff policy and repo instructions allow commits. Do not accumulate a large uncommitted bring-up diff.
 9. If pushing is allowed, handle the MR according to the kickoff policy: create one if allowed and none exists, otherwise keep the branch-only workflow.
-10. If an MR exists and pushing is allowed, schedule the following task 30-60 seconds after pushes: fetch open review comments with the appropriate VCS CLI (`glab` for GitLab, `gh` for GitHub) or available MCP, and fold them into the next plan reassessment. Human MR comments do not need Claude re-review unless they trigger design, scope, or correctness uncertainty.
+10. If an MR exists and pushing is allowed, schedule the following task 30-60 seconds after pushes: fetch open review comments with an authenticated API client and fold them into the next plan reassessment. Human MR comments do not need Claude re-review unless they trigger design, scope, or correctness uncertainty.
 11. Repeat until the task is complete, aligned with review, and verified.
 
 ## Stop Conditions
@@ -126,3 +153,19 @@ Decision log entry format:
 ```
 
 Keep the decision log factual and short. It records why the agent proceeded despite unresolved disagreement; it is not a substitute for committed design docs or code comments.
+
+## Limitations
+
+- This skill orchestrates the parent agent; it does not grant write, commit, push, or MR permissions.
+- Claude review is advisory. The parent agent must verify findings and own final decisions.
+- Local decision logs are intentionally uncommitted and can be lost with the worktree.
+- MR polling depends on the repository host and available authenticated client.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| Review command lacks `$review_script` | `claude-code-review-session` was not loaded first. | Load that skill and set `review_script` from its Path Setup. |
+| Decision log path cannot be excluded | Current directory is not a Git worktree. | Ask before choosing another local-only log location. |
+| Push or MR step fails | Missing authentication, wrong remote, or user policy disallows it. | Stop and ask; do not infer permission or retry destructively. |
+| Claude and parent agent disagree repeatedly | Review loop hit the deadlock threshold. | Document the disagreement in `$decision_log`; ask the human unless autonomous mode was explicit. |

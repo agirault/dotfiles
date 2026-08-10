@@ -58,9 +58,34 @@ REQUIREMENTS_SYSTEM_PROMPT = (
 )
 
 READ_ONLY_TOOLS = "Read,Grep,Glob,LS"
+NONINTERACTIVE_TOOLS_WARNING = (
+    "warning: child Claude runs with --permission-mode dontAsk; allowed "
+    f"{READ_ONLY_TOOLS} file-inspection tool calls execute without confirmation. Use "
+    "--tools none when all review context is supplied directly or review paths "
+    "may expose sensitive files."
+)
+MAX_SYSTEM_EXTRA_BYTES = 4000
 STREAM_METADATA_INTERVAL_SECONDS = 1.0
 DEFAULT_STORE_DIR = "~/.claude/review-sessions"
 DEFAULT_TMUX_SESSION = "claude-review"
+DEFAULT_GIT_TIMEOUT_SECONDS = 30
+DEFAULT_HEARTBEAT_SECONDS = 30
+DEFAULT_MAX_DIFF_BYTES = 180_000
+DEFAULT_TMUX_RUNNER_IDLE_SECONDS = 300
+DEFAULT_WAIT_POLL_SECONDS = 5
+HASH_SUFFIX_LENGTH = 8
+MAX_SESSION_NAME_LENGTH = 120
+SESSION_NAME_PREFIX_LENGTH = MAX_SESSION_NAME_LENGTH - HASH_SUFFIX_LENGTH - 1
+MAX_TMUX_WINDOW_NAME_LENGTH = 80
+STATUS_STALE_GRACE_SECONDS = 5
+HEARTBEAT_WRITE_INTERVAL_MAX_SECONDS = 5
+DURATION_PRECISION_DIGITS = 3
+TEE_SELECT_TIMEOUT_SECONDS = 0.2
+TEE_READ_CHUNK_BYTES = 8192
+COMMAND_TIMEOUT_EXIT_CODE = 124
+TMUX_PANE_STATUS_FIELD_COUNT = 3
+TMUX_NEW_WINDOW_FIELD_COUNT = 3
+RUNNER_IDLE_SLEEP_SECONDS = 0.2
 
 CALLER_PREFIX_ENV = (
     "CLAUDE_SESSION_NAME",
@@ -173,10 +198,10 @@ def run(
         stderr = exc.stderr if isinstance(exc.stderr, str) else ""
         message = f"command timed out after {timeout} seconds"
         stderr = f"{stderr}\n{message}".strip()
-        return subprocess.CompletedProcess(args, 124, stdout, stderr)
+        return subprocess.CompletedProcess(args, COMMAND_TIMEOUT_EXIT_CODE, stdout, stderr)
 
 
-def git_output(cwd: Path, args: list[str], timeout: float | None = 30) -> str:
+def git_output(cwd: Path, args: list[str], timeout: float | None = DEFAULT_GIT_TIMEOUT_SECONDS) -> str:
     proc = run(["git", *args], cwd, timeout=timeout)
     if proc.returncode != 0:
         return ""
@@ -186,14 +211,14 @@ def git_output(cwd: Path, args: list[str], timeout: float | None = 30) -> str:
 def repo_identity(cwd: Path) -> tuple[str, str, str]:
     root = git_output(cwd, ["rev-parse", "--show-toplevel"])
     if not root:
-        digest = hashlib.sha1(str(cwd).encode("utf-8")).hexdigest()[:8]
+        digest = hashlib.sha1(str(cwd).encode("utf-8")).hexdigest()[:HASH_SUFFIX_LENGTH]
         return cwd.name or "cwd", "nogit", digest
 
     root_path = Path(root)
     branch = git_output(cwd, ["branch", "--show-current"])
     if not branch:
         branch = git_output(cwd, ["rev-parse", "--short", "HEAD"]) or "detached"
-    digest = hashlib.sha1(root.encode("utf-8")).hexdigest()[:8]
+    digest = hashlib.sha1(root.encode("utf-8")).hexdigest()[:HASH_SUFFIX_LENGTH]
     return root_path.name, branch, digest
 
 
@@ -239,9 +264,9 @@ def caller_prefix(args: argparse.Namespace) -> str | None:
         if not value:
             continue
         if name == "CODEX_THREAD_ID":
-            return safe_key(f"codex-{value[:8]}")
+            return safe_key(f"codex-{value[:HASH_SUFFIX_LENGTH]}")
         if name == "CLAUDE_SESSION_ID":
-            return safe_key(f"claude-{value[:8]}")
+            return safe_key(f"claude-{value[:HASH_SUFFIX_LENGTH]}")
         return safe_key(value)
     return None
 
@@ -250,15 +275,15 @@ def review_session_name(args: argparse.Namespace, key: str) -> str:
     base = f"review-{safe_key(key)}"
     prefix = caller_prefix(args)
     name = f"{prefix}-{base}" if prefix else base
-    if len(name) <= 120:
+    if len(name) <= MAX_SESSION_NAME_LENGTH:
         return name.rstrip("-")
-    digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
-    return f"{name[:111].rstrip('-')}-{digest}"
+    digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:HASH_SUFFIX_LENGTH]
+    return f"{name[:SESSION_NAME_PREFIX_LENGTH].rstrip('-')}-{digest}"
 
 
 def tmux_window_name(key: str) -> str:
     base = f"review-{safe_key(key)}"
-    return base[:80].rstrip("-")
+    return base[:MAX_TMUX_WINDOW_NAME_LENGTH].rstrip("-")
 
 
 # ---------------------------------------------------------------------------
@@ -326,17 +351,43 @@ def resolve_tmux_runner_idle_seconds(args: argparse.Namespace) -> int:
         return args.tmux_runner_idle_seconds
     if args.tmux_keep_window:
         return -1
-    value = os.environ.get("CLAUDE_REVIEW_TMUX_RUNNER_IDLE_SECONDS", "300")
+    value = os.environ.get("CLAUDE_REVIEW_TMUX_RUNNER_IDLE_SECONDS", str(DEFAULT_TMUX_RUNNER_IDLE_SECONDS))
     try:
         return int(value)
     except ValueError:
-        return 300
+        return DEFAULT_TMUX_RUNNER_IDLE_SECONDS
 
 
 def resolve_background_launcher(requested: str) -> str:
     if requested == "auto":
         return "tmux" if shutil.which("tmux") else "subprocess"
     return requested
+
+
+def resolve_claude_bin(value: str) -> str:
+    candidate = value.strip() if value else ""
+    if not candidate:
+        raise SystemExit("--claude-bin must not be empty")
+
+    has_path_separator = os.path.sep in candidate or (os.path.altsep is not None and os.path.altsep in candidate)
+    if has_path_separator:
+        path = Path(candidate).expanduser()
+        if not path.is_absolute():
+            path = path.resolve()
+    else:
+        found = shutil.which(candidate)
+        if not found:
+            raise SystemExit(f"Claude Code executable not found: {candidate}")
+        path = Path(found)
+
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise SystemExit(f"Could not resolve Claude Code executable {path}: {exc}") from exc
+
+    if not resolved.is_file() or not os.access(resolved, os.X_OK):
+        raise SystemExit(f"Claude Code executable is not executable: {resolved}")
+    return str(resolved)
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +513,7 @@ def find_tmux_window(base_cmd: list[str], session_name: str, window_name: str) -
     )
     if pane.returncode != 0:
         return None
-    pane_id, pane_pid, pane_dead = split_tsv_fields(pane.stdout, 3)
+    pane_id, pane_pid, pane_dead = split_tsv_fields(pane.stdout, TMUX_PANE_STATUS_FIELD_COUNT)
     if pane_dead == "1":
         return None
     return {"window_id": window_id, "pane_id": pane_id, "pane_pid": pane_pid}
@@ -569,7 +620,7 @@ def ensure_tmux_session(
             "bootstrap",
             "-c",
             str(cwd),
-            "sleep 1000000000",
+            "tail -f /dev/null",
         ],
         text=True,
         capture_output=True,
@@ -719,8 +770,8 @@ def status_payload(metadata: dict[str, Any]) -> dict[str, Any]:
     # a live wrapper with a quiet stream is stalled, not necessarily crashed.
     payload = dict(metadata)
     status = str(payload.get("status") or "missing")
-    heartbeat_interval = int(payload.get("heartbeat_interval_seconds") or 30)
-    stale_after = max(heartbeat_interval * 2, heartbeat_interval + 5)
+    heartbeat_interval = int(payload.get("heartbeat_interval_seconds") or DEFAULT_HEARTBEAT_SECONDS)
+    stale_after = max(heartbeat_interval * 2, heartbeat_interval + STATUS_STALE_GRACE_SECONDS)
     now = epoch_seconds()
     last_heartbeat = epoch_from_iso(payload.get("last_heartbeat_at"))
     last_claude_event = epoch_from_iso(payload.get("last_claude_event_at"))
@@ -996,6 +1047,23 @@ def review_system_prompt(args: argparse.Namespace, has_requirements: bool) -> st
     return "\n\n".join(part for part in parts if part)
 
 
+def validate_system_extra(args: argparse.Namespace) -> None:
+    if not args.system_extra:
+        return
+    encoded = args.system_extra.encode("utf-8")
+    if len(encoded) > MAX_SYSTEM_EXTRA_BYTES:
+        raise SystemExit(f"--system-extra must be at most {MAX_SYSTEM_EXTRA_BYTES} bytes")
+    if "\x00" in args.system_extra:
+        raise SystemExit("--system-extra must not contain NUL bytes")
+
+
+def warn_noninteractive_tools(args: argparse.Namespace) -> None:
+    # dontAsk gives consistent noninteractive reviews, but callers should see
+    # that allowed read-only tool calls will not prompt individually.
+    if args.tools != "none" and not getattr(args, "_suppress_noninteractive_warning", False):
+        print(NONINTERACTIVE_TOOLS_WARNING, file=sys.stderr)
+
+
 def build_prompt(args: argparse.Namespace, stdin_text: str, include_diff: bool, cwd: Path) -> str:
     # Prefer path-based review context; only paste stdin, requirements, and git
     # diff context that the caller explicitly provided or requested.
@@ -1024,6 +1092,8 @@ def build_prompt(args: argparse.Namespace, stdin_text: str, include_diff: bool, 
 
 
 def claude_command(args: argparse.Namespace, session_id: str | None, key: str, requirements_present: bool) -> list[str]:
+    # args.tools is an allowlisted policy name, not raw Claude tool names.
+    # The wrapper only maps it to read-only tools or no tools.
     tools = "" if args.tools == "none" else READ_ONLY_TOOLS
     output_format = "stream-json" if args.stream else "json"
     cmd = [
@@ -1036,6 +1106,7 @@ def claude_command(args: argparse.Namespace, session_id: str | None, key: str, r
         "--tools",
         tools,
         "--disable-slash-commands",
+        "--strict-mcp-config",
         "--permission-mode",
         "dontAsk",
         "--system-prompt",
@@ -1139,7 +1210,7 @@ def run_claude(
                     proc.kill()
                     break
                 update_metadata(paths.metadata, status="running", last_heartbeat_at=iso_now())
-                sleep_for = max(1, min(args.heartbeat_seconds, 5))
+                sleep_for = max(1, min(args.heartbeat_seconds, HEARTBEAT_WRITE_INTERVAL_MAX_SECONDS))
                 if args.timeout_seconds:
                     sleep_for = max(1, min(sleep_for, int(args.timeout_seconds - elapsed) or 1))
                 try:
@@ -1159,7 +1230,7 @@ def run_claude(
             paths.metadata,
             status="timeout",
             completed_at=iso_now(),
-            duration_s=round(epoch_seconds() - start_time, 3),
+            duration_s=round(epoch_seconds() - start_time, DURATION_PRECISION_DIGITS),
             exit_code=returncode,
         )
     return ReviewRunResult(cmd, returncode, stdout, stderr, timed_out)
@@ -1182,7 +1253,7 @@ def run_claude_streaming(
     timed_out = False
     start_time = epoch_seconds()
     last_heartbeat_update_at = start_time
-    heartbeat_write_interval = max(1, min(args.heartbeat_seconds, 5))
+    heartbeat_write_interval = max(1, min(args.heartbeat_seconds, HEARTBEAT_WRITE_INTERVAL_MAX_SECONDS))
     stream_state = StreamMetadataState()
     final_event: dict[str, Any] | None = None
     write_run_start_metadata(args, paths, start_time, streaming=True)
@@ -1264,7 +1335,7 @@ def run_claude_streaming(
             paths.metadata,
             status="timeout",
             completed_at=iso_now(),
-            duration_s=round(epoch_seconds() - start_time, 3),
+            duration_s=round(epoch_seconds() - start_time, DURATION_PRECISION_DIGITS),
             exit_code=returncode,
         )
     return ReviewRunResult(cmd, returncode, stdout, stderr, timed_out)
@@ -1291,20 +1362,20 @@ def build_start_parser() -> argparse.ArgumentParser:
     parser.add_argument("--background", action="store_true", help="Start the review in the background and return after writing job metadata.")
     parser.add_argument("--session-id", help="Resume this explicit Claude session id.")
     parser.add_argument("--store-dir", default=DEFAULT_STORE_DIR, help="Directory for key -> session id files.")
-    parser.add_argument("--claude-bin", default=os.environ.get("CLAUDE_BIN", "claude"), help="Claude Code executable.")
+    parser.add_argument("--claude-bin", default="claude", help="Claude Code executable. Use an explicit path for custom installs.")
     parser.add_argument("--model", default=os.environ.get("CLAUDE_REVIEW_MODEL", "sonnet"), help="Claude model alias/name.")
     parser.add_argument("--mode", choices=sorted(MODE_SYSTEM_PROMPTS), default=os.environ.get("CLAUDE_REVIEW_MODE", "implementation"), help="Reviewer stance.")
     parser.add_argument("--requirements", action="append", default=[], help="Requirement/spec text to check against; repeatable.")
     parser.add_argument("--requirements-file", action="append", default=[], help="File containing requirements/spec text; repeatable.")
     parser.add_argument("--review-path", action="append", default=[], help="File or directory path the reviewer may inspect with read-only tools; repeatable.")
-    parser.add_argument("--tools", choices=("read-only", "none"), default="read-only", help="Tool policy for child Claude. Default allows Read,Grep,Glob,LS only.")
+    parser.add_argument("--tools", choices=("read-only", "none"), default="read-only", help="Allowlisted child Claude tool policy. Raw Claude tool names are not accepted.")
     parser.add_argument("--system-extra", help="Additional system prompt text appended after the selected mode.")
     parser.add_argument("--session-name-prefix", default=os.environ.get("CLAUDE_REVIEW_SESSION_NAME_PREFIX"), help="Prefix for the child Claude session name.")
     parser.add_argument("--no-session-name-prefix", action="store_true", help="Do not infer a child session-name prefix from caller environment.")
     parser.add_argument("--budget", help="Optional value for claude --max-budget-usd.")
     parser.add_argument("--max-rounds", type=int, default=int(os.environ.get("CLAUDE_REVIEW_MAX_ROUNDS", "3")), help="Maximum review rounds for this key; 0 disables the guardrail.")
     parser.add_argument("--timeout-seconds", type=int, default=0, help="Wall-clock timeout for the child Claude process; 0 disables.")
-    parser.add_argument("--heartbeat-seconds", type=int, default=30, help="How often the wrapper updates running metadata.")
+    parser.add_argument("--heartbeat-seconds", type=int, default=DEFAULT_HEARTBEAT_SECONDS, help="How often the wrapper updates running metadata.")
     parser.add_argument("--stream", action=argparse.BooleanOptionalAction, default=None, help="Use Claude stream-json and record Claude event activity. Defaults on for background runs.")
     parser.add_argument("--background-launcher", choices=("auto", "subprocess", "tmux"), default="auto", help="How to launch background workers.")
     parser.add_argument("--tmux-session", default=os.environ.get("CLAUDE_REVIEW_TMUX_SESSION", DEFAULT_TMUX_SESSION), help="Normal tmux session used for review windows.")
@@ -1315,8 +1386,8 @@ def build_start_parser() -> argparse.ArgumentParser:
     parser.add_argument("--diff", action="store_true", help="Force including git status and diff.")
     parser.add_argument("--no-diff", action="store_true", help="Do not include git status or diff.")
     parser.add_argument("--path", action="append", default=[], help="Git pathspec to include in diff; repeatable.")
-    parser.add_argument("--max-diff-bytes", type=int, default=180_000, help="Truncate captured diff at N bytes; 0 disables truncation.")
-    parser.add_argument("--git-timeout-seconds", type=int, default=30, help="Timeout for each git command used to capture review context.")
+    parser.add_argument("--max-diff-bytes", type=int, default=DEFAULT_MAX_DIFF_BYTES, help="Truncate captured diff at N bytes; 0 disables truncation.")
+    parser.add_argument("--git-timeout-seconds", type=int, default=DEFAULT_GIT_TIMEOUT_SECONDS, help="Timeout for each git command used to capture review context.")
     parser.add_argument("--json", action="store_true", help="Print raw Claude JSON instead of only the result text.")
     parser.add_argument("--dry-run", action="store_true", help="Print resolved settings without calling Claude.")
     return parser
@@ -1348,6 +1419,7 @@ def next_round_index(args: argparse.Namespace, paths: ReviewPaths, key: str) -> 
 
 
 def prepare_start(args: argparse.Namespace, cwd: Path, stdin_text: str) -> tuple[str, ReviewPaths, str | None, bool, bool, str, str, int]:
+    validate_system_extra(args)
     key = safe_key(args.key) if args.key else default_key(cwd)
     paths = review_paths(Path(args.store_dir), key)
     if args.review_path and args.tools == "none":
@@ -1376,14 +1448,44 @@ def background_child_argv(start_argv: list[str]) -> list[str]:
     return child_argv
 
 
+def set_start_arg(argv: list[str], flag: str, value: str) -> list[str]:
+    updated: list[str] = []
+    prompt_separator_seen = False
+    inserted = False
+    index = 0
+    while index < len(argv):
+        item = argv[index]
+        if item == "--":
+            if not inserted:
+                updated.extend([flag, value])
+                inserted = True
+            prompt_separator_seen = True
+            updated.append(item)
+            index += 1
+            continue
+        if not prompt_separator_seen and item == flag:
+            updated.extend([flag, value])
+            inserted = True
+            index += 2
+            continue
+        updated.append(item)
+        index += 1
+    if not inserted:
+        updated.extend([flag, value])
+    return updated
+
+
 def start_background(args: argparse.Namespace, cwd: Path, stdin_text: str, start_argv: list[str]) -> int:
     # Background mode records the request first, then launches either a durable
     # tmux runner or a detached subprocess to consume it.
     if args.stream is None:
         args.stream = True
     key, paths, session_id, requirements_present, include_diff, prompt, session_name, round_index = prepare_start(args, cwd, stdin_text)
+    args.claude_bin = resolve_claude_bin(args.claude_bin)
+    warn_noninteractive_tools(args)
     paths.metadata.parent.mkdir(parents=True, exist_ok=True)
     child_argv = background_child_argv(start_argv)
+    child_argv = set_start_arg(child_argv, "--claude-bin", args.claude_bin)
     if args.stream and "--stream" not in child_argv and "--no-stream" not in child_argv:
         child_argv.append("--stream")
     request = {
@@ -1391,6 +1493,7 @@ def start_background(args: argparse.Namespace, cwd: Path, stdin_text: str, start
         "cwd": str(cwd),
         "key": key,
         "round_index": round_index,
+        "suppress_noninteractive_warning": True,
         "store_dir": str(paths.metadata.parent),
         "stdin_text": stdin_text,
     }
@@ -1541,7 +1644,7 @@ def start_background(args: argparse.Namespace, cwd: Path, stdin_text: str, start
                 unlink_silent(request_path)
                 sys.stderr.write(launch.stderr)
                 return launch.returncode or 1
-            window_id, pane_id, pane_pid = split_tsv_fields(launch.stdout, 3)
+            window_id, pane_id, pane_pid = split_tsv_fields(launch.stdout, TMUX_NEW_WINDOW_FIELD_COUNT)
             append_manager_log(
                 manager_log,
                 "opened",
@@ -1618,6 +1721,8 @@ def execute_start(args: argparse.Namespace, cwd: Path, stdin_text: str) -> int:
         )
         return 0
 
+    args.claude_bin = resolve_claude_bin(args.claude_bin)
+    warn_noninteractive_tools(args)
     start_time = epoch_seconds()
     update_metadata(
         paths.metadata,
@@ -1657,7 +1762,7 @@ def execute_start(args: argparse.Namespace, cwd: Path, stdin_text: str) -> int:
             paths.metadata,
             status="timeout" if proc.timed_out else "failed",
             completed_at=iso_now(),
-            duration_s=round(epoch_seconds() - start_time, 3),
+            duration_s=round(epoch_seconds() - start_time, DURATION_PRECISION_DIGITS),
             exit_code=proc.returncode,
         )
         return proc.returncode or 1
@@ -1679,7 +1784,7 @@ def execute_start(args: argparse.Namespace, cwd: Path, stdin_text: str) -> int:
             paths.metadata,
             status="done",
             completed_at=iso_now(),
-            duration_s=round(epoch_seconds() - start_time, 3),
+            duration_s=round(epoch_seconds() - start_time, DURATION_PRECISION_DIGITS),
             exit_code=proc.returncode,
             session_id=child_session_id,
             findings_path=str(paths.findings),
@@ -1705,7 +1810,7 @@ def execute_start(args: argparse.Namespace, cwd: Path, stdin_text: str) -> int:
         paths.metadata,
         status="timeout" if proc.timed_out else "failed",
         completed_at=iso_now(),
-        duration_s=round(epoch_seconds() - start_time, 3),
+        duration_s=round(epoch_seconds() - start_time, DURATION_PRECISION_DIGITS),
         exit_code=proc.returncode,
         errors=errors,
     )
@@ -1862,7 +1967,7 @@ def command_cancel(argv: list[str]) -> int:
 
 def command_wait(argv: list[str]) -> int:
     parser = key_command_parser("Wait for a persistent Claude review to finish.", json_flag=True)
-    parser.add_argument("--poll-seconds", type=int, default=5)
+    parser.add_argument("--poll-seconds", type=int, default=DEFAULT_WAIT_POLL_SECONDS)
     parser.add_argument("--timeout-seconds", type=int, default=0)
     parser.add_argument("--stalled-grace-polls", type=int, default=1, help="Consecutive stalled polls to tolerate before exiting 2.")
     args = parser.parse_args(argv)
@@ -1906,6 +2011,8 @@ def command_worker(argv: list[str]) -> int:
     request = read_json(request_path)
     start_args = parse_start_args(list(request.get("argv") or []))
     start_args.background = False
+    if request.get("suppress_noninteractive_warning"):
+        start_args._suppress_noninteractive_warning = True
     if "round_index" in request:
         start_args._prepared_round_index = int(request["round_index"])
     cwd = Path(str(request.get("cwd") or Path.cwd()))
@@ -1971,13 +2078,13 @@ def tee_worker_request(request_path: Path, request: dict[str, Any]) -> int:
             streams[proc.stderr.fileno()] = (proc.stderr, sys.stderr, stderr_log)
 
         while streams:
-            ready, _, _ = select.select(list(streams), [], [], 0.2)
+            ready, _, _ = select.select(list(streams), [], [], TEE_SELECT_TIMEOUT_SECONDS)
             if not ready and proc.poll() is not None:
                 ready = list(streams)
             for fd in ready:
                 source, terminal, log_file = streams[fd]
                 try:
-                    chunk = os.read(fd, 8192)
+                    chunk = os.read(fd, TEE_READ_CHUNK_BYTES)
                 except OSError:
                     chunk = b""
                 if not chunk:
@@ -2074,7 +2181,7 @@ def command_runner(argv: list[str]) -> int:
             )
             print("Claude review runner idle timeout reached; exiting.", flush=True)
             return 0
-        time.sleep(0.2)
+        time.sleep(RUNNER_IDLE_SLEEP_SECONDS)
 
 
 # ---------------------------------------------------------------------------
