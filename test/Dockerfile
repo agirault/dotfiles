@@ -21,4 +21,6 @@ RUN echo -e "[user]\n    name = Old Name" > .gitconfig \
     && echo "# old tmux" > .tmux.conf \
     && mkdir -p .claude \
     && echo '{"old": true}' > .claude/settings.json \
+    && mkdir -p .codex \
+    && echo 'model = "old"' > .codex/config.toml \
     && echo "# old bashrc" > .bashrc

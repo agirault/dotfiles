@@ -29,6 +29,8 @@ if [[ "$phase" == "configs" ]]; then
     check ".config/fish/config.fish is a symlink" test -L "$HOME/.config/fish/config.fish"
     check ".config/fish/conf.d/env_loader.fish is a symlink" test -L "$HOME/.config/fish/conf.d/env_loader.fish"
     check ".claude/settings.json is a symlink" test -L "$HOME/.claude/settings.json"
+    check ".codex/config.toml is a symlink" test -L "$HOME/.codex/config.toml"
+    check ".codex/AGENTS.md is a symlink" test -L "$HOME/.codex/AGENTS.md"
     check ".claude/CLAUDE.md is a symlink" test -L "$HOME/.claude/CLAUDE.md"
     check ".claude/executable_statusline.sh is a symlink" test -L "$HOME/.claude/executable_statusline.sh"
     check ".bashrc.d/00-env-loader.sh is a symlink" test -L "$HOME/.bashrc.d/00-env-loader.sh"
@@ -50,6 +52,8 @@ if [[ "$phase" == "configs" ]]; then
     check ".gitconfig has [include] for .local" grep -q 'path = ~/.gitconfig.local' "$HOME/.gitconfig"
     check ".gitconfig has NO [user] section" ! grep -q '^\[user\]' "$HOME/.gitconfig"
     check ".claude/settings.json uses ~ not /home/" ! grep -q '/home/' "$HOME/.claude/settings.json"
+    check ".codex/config.toml enables workspace write" grep -q '^sandbox_mode = "workspace-write"' "$HOME/.codex/config.toml"
+    check ".codex/config.toml enables public plugins" grep -q '^\[plugins\."superpowers@openai-curated"\]' "$HOME/.codex/config.toml"
     check ".bashrc sources .bashrc.d" grep -q 'bashrc.d' "$HOME/.bashrc"
     check ".tmux.conf configures TPM" grep -q "tmux-plugins/tpm" "$HOME/.tmux.conf"
     check ".tmux.conf configures tmux-resurrect" grep -q "tmux-plugins/tmux-resurrect" "$HOME/.tmux.conf"
@@ -81,6 +85,7 @@ elif [[ "$phase" == "unlink" ]]; then
     check ".tmux.conf is NOT a symlink" ! test -L "$HOME/.tmux.conf"
     check ".config/fish/config.fish is NOT a symlink" ! test -L "$HOME/.config/fish/config.fish"
     check ".claude/settings.json is NOT a symlink" ! test -L "$HOME/.claude/settings.json"
+    check ".codex/config.toml is NOT a symlink" ! test -L "$HOME/.codex/config.toml"
 
     # Originals should be restored
     echo "-- Originals restored --"

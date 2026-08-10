@@ -41,6 +41,7 @@ cd ~/dotfiles
 - **Claude**: Claude Code settings, Catppuccin status line, global agent instructions (CLAUDE.md), hooks:
   - `auto-cleanup-session.py` (SessionEnd) - deletes trivially empty sessions on exit
   - `auto-name-session.py` (Stop) - generates titles for unnamed sessions via Claude haiku after the 2nd assistant turn; lockfile-guarded against races. Runs early so `claude --resume <title>` / tab completion work before you exit.
+- **Codex**: portable model, auto-approval, workspace-write sandbox, TUI, public marketplaces/plugins, global instructions (AGENTS.md), and the shared Claude review skills. Authentication, project trust, runtime state, and internal integrations remain local.
 - **Bash**: `.bashrc.d/` snippets for env loading and login script sourcing
 - **Shared env** (`~/.config/env/`): `env.conf` and `login.sh` used by both bash and fish (see below)
 

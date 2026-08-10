@@ -11,23 +11,9 @@ id_ed25519*
 .env
 .env.*
 
-# Claude runtime state
-.claude/memory/
-.claude/history*
-.claude/sessions/
-.claude/projects/
-.claude/cache/
-.claude/file-history/
-.claude/backups/
-.claude/downloads/
-.claude/debug/
-.claude/plugins/
-.claude/skills/
-.claude/tasks/
-.claude/plans/
-.claude/session-env/
-.claude/shell-snapshots/
-.claude/settings.local.json
+# Agent runtime state. Portable configuration lives under stow/dotfiles/.
+/.claude/
+/.codex/
 
 # Python bytecode
 __pycache__/
