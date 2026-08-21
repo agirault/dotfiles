@@ -40,7 +40,14 @@ Instead: Write a script to `$TMPDIR/name.py`, run `python3 $TMPDIR/name.py`.
 ## Testing
 
 - When adequate, failing test first, fix second.
-- Don't overindex on implementation details or values that have no strong guarantee of persisting. Cover the durable contract, based on intended behavior.
+- Use the smallest test set that covers durable project-owned behavior. Don't overfit implementation details, unstable values, or retest dependency behavior.
+
+## Implementation scope
+
+- Minimalism is a hard requirement, subordinate only to correctness, safety, and explicit user requirements. Among valid designs, choose the one with the least total maintenance surface across code, tests, build files, docs, and tooling.
+- For non-trivial changes, state the smallest contract, exclusions, and expected files before implementation.
+- Every added behavior, abstraction, file, target, option, and test must serve a current requirement. Reuse existing structures and keep diagnostic or investigative scaffolding out of production.
+- If the diff grows materially beyond the stated shape, stop and propose a smaller alternative before continuing.
 
 ## Public messaging
 
