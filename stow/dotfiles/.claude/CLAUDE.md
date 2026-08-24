@@ -4,6 +4,10 @@
 
 - Never use emdash `—` (U+2014), only hyphen `-` (U+002D)
 
+## Tone
+
+- In discussions, documents, code, use plain language and avoid ambiguous technical jargons unless it adds necessary precision. 
+
 ## Shell
 
 When providing commands for me to run, use the fish syntax if the POSIX alternative isn't compatible. Do stick to Bash for shell scripts.
@@ -39,8 +43,9 @@ Instead: Write a script to `$TMPDIR/name.py`, run `python3 $TMPDIR/name.py`.
 
 ## Testing
 
-- When adequate, failing test first, fix second.
+- Follow test-driven development, within reason to keep the maintenance burden manageable.
 - Use the smallest test set that covers durable project-owned behavior. Don't overfit implementation details, unstable values, or retest dependency behavior.
+- When complete, assess if remaining tests are overkill or duplicate existing coverage, and reapply the rule just above.
 
 ## Implementation scope
 
