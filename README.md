@@ -43,6 +43,28 @@ Two steps stay manual, because macOS protects them:
   the microphone need approval after their first launch. Open System Settings
   → Privacy & Security and enable each app.
 
+#### Keeping ssh alive on a Mac you connect to
+
+A sleeping Mac stops answering the network, so an ssh session to it hangs. A
+locked screen does not cause this; only sleep does. Run these on the machine
+you connect to:
+
+```bash
+sudo pmset -c sleep 0    # do not sleep while on power
+sudo pmset -c womp 1     # wake when a network packet arrives
+```
+
+`-c` applies on power only, so battery behaviour does not change. Check the
+result with `pmset -g custom`, because device management can set a power
+policy that replaces this one. `womp` is reliable over Ethernet and less so
+over Wi-Fi.
+
+These commands are not in `macos-defaults.sh`. They need `sudo`, which that
+script never uses, and only a machine you connect to needs them.
+
+The better answer is to run tmux on the remote machine with `tm`. The session
+then survives the disconnect and you reattach, instead of losing work.
+
 ## Stow packages
 
 | Package | Target | Contents |
