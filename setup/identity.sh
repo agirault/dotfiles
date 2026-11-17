@@ -120,12 +120,11 @@ fi
 # On macOS, ask ssh to load the key from the login Keychain so the passphrase
 # is typed once, not on every signed commit.
 if [[ "$OS" == macos ]]; then
-    ssh_config="$HOME/.ssh/config"
-    if [[ ! -f "$ssh_config" ]] || ! grep -q "UseKeychain" "$ssh_config"; then
-        mkdir -p "$HOME/.ssh"
-        printf '\nHost *\n  AddKeysToAgent yes\n  UseKeychain yes\n  IdentityFile %s\n' "$ssh_key" >> "$ssh_config"
-        echo "    Added Keychain settings to $ssh_config."
-    fi
+    # Do not write to ~/.ssh/config here. That path is a symlink into this
+    # repository, so an append would change the committed file and add a
+    # second "Host *" block. The shared config already sets AddKeysToAgent
+    # and UseKeychain. Only load the key, which puts the passphrase in the
+    # Keychain now instead of at the next connection.
     ssh-add --apple-use-keychain "$ssh_key" 2>/dev/null || true
 fi
 
