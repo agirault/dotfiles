@@ -81,11 +81,11 @@
     },
     "filesystem": {
       "allowWrite": [
-        "/home/agirault/",
+        "~/",
         "/tmp/"
       ],
       "allowRead": [
-        "/home/agirault/",
+        "~/",
         "/tmp/"
       ]
     }

@@ -5,10 +5,25 @@ set -euo pipefail
 PASS=0
 FAIL=0
 
+# Run a command and report whether it succeeded.
+# A leading "!" inverts the result, so a check can assert that something is
+# absent. Bash only treats "!" as negation when it is written literally in the
+# source, not when it arrives through "$@", so handle it here.
 check() {
     local desc="$1"
     shift
-    if "$@" >/dev/null 2>&1; then
+
+    local negate=false
+    if [[ "${1:-}" == "!" ]]; then
+        negate=true
+        shift
+    fi
+
+    local ok=true
+    "$@" >/dev/null 2>&1 || ok=false
+    [[ "$negate" == true ]] && { [[ "$ok" == true ]] && ok=false || ok=true; }
+
+    if [[ "$ok" == true ]]; then
         echo "  PASS: $desc"
         ((++PASS))
     else
@@ -55,12 +70,11 @@ if [[ "$phase" == "configs" ]]; then
     check ".codex/config.toml enables workspace write" grep -q '^sandbox_mode = "workspace-write"' "$HOME/.codex/config.toml"
     check ".codex/config.toml enables public plugins" grep -q '^\[plugins\."superpowers@openai-curated"\]' "$HOME/.codex/config.toml"
     check ".bashrc sources .bashrc.d" grep -q 'bashrc.d' "$HOME/.bashrc"
-    check ".tmux.conf configures TPM" grep -q "tmux-plugins/tpm" "$HOME/.tmux.conf"
-    check ".tmux.conf configures tmux-resurrect" grep -q "tmux-plugins/tmux-resurrect" "$HOME/.tmux.conf"
-    check ".tmux.conf configures tmux-continuum" grep -q "tmux-plugins/tmux-continuum" "$HOME/.tmux.conf"
-    check ".tmux.conf enables continuum restore" grep -q "@continuum-restore 'on'" "$HOME/.tmux.conf"
-    check ".tmux.conf sets TPM plugin path" grep -q "TMUX_PLUGIN_MANAGER_PATH" "$HOME/.tmux.conf"
-    check "tmux plugin setup script has no syntax errors" bash -n "$HOME/dotfiles/setup/tmux-plugins.sh"
+    check ".tmux.conf sets the Ctrl-a prefix" grep -q "set -g prefix C-a" "$HOME/.tmux.conf"
+    check ".tmux.conf declares no plugins" ! grep -q "@plugin" "$HOME/.tmux.conf"
+    check ".gitconfig signs commits" grep -q "gpgsign = true" "$HOME/.gitconfig"
+    check ".gitconfig signs with SSH" grep -q "format = ssh" "$HOME/.gitconfig"
+    check ".gitconfig resolves gh through PATH" ! grep -q "/usr/bin/gh" "$HOME/.gitconfig"
     check "tm is executable" test -x "$HOME/.local/bin/tm"
 
     # Commands available

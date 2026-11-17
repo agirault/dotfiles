@@ -65,7 +65,9 @@ attach() {
     local view="view-$RANDOM"
     local -a args=()
     is_cc && args=(-CC)
-    tmux "${args[@]}" new-session -t "$SESSION" -s "$view" \; \
+    # macOS ships bash 3.2, which treats an empty array as unbound under
+    # set -u. The ${x[@]+...} guard expands to nothing when args is empty.
+    tmux ${args[@]+"${args[@]}"} new-session -t "$SESSION" -s "$view" \; \
         set-option destroy-unattached on
 }
 
