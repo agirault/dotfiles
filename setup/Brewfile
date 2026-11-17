@@ -59,6 +59,9 @@ cask "spotify"
 cask "superwhisper"
 cask "vlc"
 cask "devin-desktop" # installs /Applications/Devin.app
+# X server. Needed to show graphical programs that run on a remote Linux
+# machine, through ssh X11 forwarding. macOS has no built-in X server.
+cask "xquartz"
 
 # -- Fonts --
 # Tide draws its icons from a Nerd Font. Ghostty is configured to use this one.
