@@ -10,6 +10,7 @@ set -euo pipefail
 #   ./setup.sh configs      # symlink dotfiles and tools via stow
 #   ./setup.sh identity     # set up git identity and commit signing only
 #   ./setup.sh defaults     # apply macOS system preferences (macOS only)
+#   ./setup.sh privileged   # macOS changes that need root (asks for password)
 #   ./setup.sh unlink       # remove symlinks and restore backups
 #
 # Flags:
@@ -171,6 +172,15 @@ phase_defaults() {
     bash "$SETUP_DIR/macos-defaults.sh"
 }
 
+# ---- Phase: privileged (macOS changes that need root) ----
+phase_privileged() {
+    if [[ "$OS" != macos ]]; then
+        echo "==> Privileged setup only applies to macOS."
+        return 0
+    fi
+    bash "$SETUP_DIR/macos-privileged.sh"
+}
+
 # ---- Phase: unlink ----
 phase_unlink() {
     echo "==> Unlinking dotfiles and tools..."
@@ -210,6 +220,9 @@ case "$phase" in
     defaults)
         phase_defaults
         ;;
+    privileged)
+        phase_privileged
+        ;;
     all)
         phase_packages
         phase_configs
@@ -219,6 +232,9 @@ case "$phase" in
         else
             phase_identity
         fi
+        # Last, because it asks for your password and a question. The rest
+        # of the run then needs no attention.
+        phase_privileged
         ;;
     unlink)
         phase_unlink

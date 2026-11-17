@@ -43,27 +43,35 @@ Two steps stay manual, because macOS protects them:
   the microphone need approval after their first launch. Open System Settings
   → Privacy & Security and enable each app.
 
-#### Keeping ssh alive on a Mac you connect to
+#### Changes that need root
 
-A sleeping Mac stops answering the network, so an ssh session to it hangs. A
-locked screen does not cause this; only sleep does. Run these on the machine
-you connect to:
+Every other setup script runs as your own user. The changes that need root are
+collected in `setup/macos-privileged.sh`, so you type your password once and
+can read one file to see what runs as root.
 
 ```bash
-sudo pmset -c sleep 0    # do not sleep while on power
-sudo pmset -c womp 1     # wake when a network packet arrives
+./setup.sh privileged
 ```
 
-`-c` applies on power only, so battery behaviour does not change. Check the
-result with `pmset -g custom`, because device management can set a power
-policy that replaces this one. `womp` is reliable over Ethernet and less so
-over Wi-Fi.
+`./setup.sh all` runs it last, after the steps that need no attention.
 
-These commands are not in `macos-defaults.sh`. They need `sudo`, which that
-script never uses, and only a machine you connect to needs them.
+It does two things:
 
-The better answer is to run tmux on the remote machine with `tm`. The session
-then survives the disconnect and you reattach, instead of losing work.
+- **Touch ID for sudo.** You then use your fingerprint instead of your
+  password. It writes `/etc/pam.d/sudo_local`, not `/etc/pam.d/sudo`, because
+  a macOS update replaces `sudo` and would remove the setting. It also adds
+  `pam_reattach`, without which Touch ID does not work inside tmux: the tmux
+  session is detached from the window server, so the prompt cannot appear and
+  `sudo` quietly asks for the password instead.
+- **Sleep settings**, after asking you. A sleeping Mac stops answering the
+  network, so an ssh session to it hangs. A locked screen does not do this,
+  only sleep does. Answer yes only on a machine you reach over ssh. Check the
+  result later with `pmset -g custom`, because device management can replace
+  it with its own power policy.
+
+For ssh sessions, the better answer is to run tmux on the remote machine with
+`tm`. The session then survives the disconnect and you reattach, instead of
+losing work.
 
 ## Stow packages
 

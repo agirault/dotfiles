@@ -23,6 +23,9 @@ brew "glab"
 
 # -- Terminal multiplexer --
 brew "tmux"
+# Lets Touch ID answer a sudo prompt inside tmux. Without it the prompt
+# cannot reach the screen, and sudo asks for the password instead.
+brew "pam-reattach"
 
 # -- Search and file tools --
 brew "ripgrep"
