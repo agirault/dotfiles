@@ -9,6 +9,21 @@ FAIL=0
 # A leading "!" inverts the result, so a check can assert that something is
 # absent. Bash only treats "!" as negation when it is written literally in the
 # source, not when it arrives through "$@", so handle it here.
+REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+
+# Report whether a path is supplied by this repository.
+#
+# "test -L" is not enough. When a target directory does not exist, stow links
+# the whole directory instead of each file in it, which it calls folding. The
+# files inside are then real files reached through a symlinked parent, so
+# "test -L" on the file is false even though stow worked. Resolve the path and
+# check where it lands instead.
+is_stowed() {
+    local real
+    real=$(readlink -f "$1" 2>/dev/null) || return 1
+    [[ "$real" == "$REPO_DIR"/* ]]
+}
+
 check() {
     local desc="$1"
     shift
@@ -39,22 +54,22 @@ if [[ "$phase" == "configs" ]]; then
 
     # Symlinks exist
     echo "-- Symlinks --"
-    check ".gitconfig is a symlink" test -L "$HOME/.gitconfig"
-    check ".tmux.conf is a symlink" test -L "$HOME/.tmux.conf"
-    check ".ssh/config is a symlink" test -L "$HOME/.ssh/config"
-    check ".config/fish/config.fish is a symlink" test -L "$HOME/.config/fish/config.fish"
-    check ".config/fish/conf.d/env_loader.fish is a symlink" test -L "$HOME/.config/fish/conf.d/env_loader.fish"
-    check ".claude/settings.json is a symlink" test -L "$HOME/.claude/settings.json"
-    check ".codex/config.toml is a symlink" test -L "$HOME/.codex/config.toml"
-    check ".codex/AGENTS.md is a symlink" test -L "$HOME/.codex/AGENTS.md"
-    check ".claude/CLAUDE.md is a symlink" test -L "$HOME/.claude/CLAUDE.md"
-    check ".claude/executable_statusline.sh is a symlink" test -L "$HOME/.claude/executable_statusline.sh"
-    check ".bashrc.d/00-env-loader.sh is a symlink" test -L "$HOME/.bashrc.d/00-env-loader.sh"
-    check ".config/env/env.conf is a symlink" test -L "$HOME/.config/env/env.conf"
-    check ".config/env/pre_env.sh is a symlink" test -L "$HOME/.config/env/pre_env.sh"
-    check ".config/env/post_env.sh is a symlink" test -L "$HOME/.config/env/post_env.sh"
-    check ".local/bin/tm is a symlink" test -L "$HOME/.local/bin/tm"
-    check ".local/bin/ssh-refresh-agent is a symlink" test -L "$HOME/.local/bin/ssh-refresh-agent"
+    check ".gitconfig is stowed" is_stowed "$HOME/.gitconfig"
+    check ".tmux.conf is stowed" is_stowed "$HOME/.tmux.conf"
+    check ".ssh/config is stowed" is_stowed "$HOME/.ssh/config"
+    check ".config/fish/config.fish is stowed" is_stowed "$HOME/.config/fish/config.fish"
+    check ".config/fish/conf.d/env_loader.fish is stowed" is_stowed "$HOME/.config/fish/conf.d/env_loader.fish"
+    check ".claude/settings.json is stowed" is_stowed "$HOME/.claude/settings.json"
+    check ".codex/config.toml is stowed" is_stowed "$HOME/.codex/config.toml"
+    check ".codex/AGENTS.md is stowed" is_stowed "$HOME/.codex/AGENTS.md"
+    check ".claude/CLAUDE.md is stowed" is_stowed "$HOME/.claude/CLAUDE.md"
+    check ".claude/executable_statusline.sh is stowed" is_stowed "$HOME/.claude/executable_statusline.sh"
+    check ".bashrc.d/00-env-loader.sh is stowed" is_stowed "$HOME/.bashrc.d/00-env-loader.sh"
+    check ".config/env/env.conf is stowed" is_stowed "$HOME/.config/env/env.conf"
+    check ".config/env/pre_env.sh is stowed" is_stowed "$HOME/.config/env/pre_env.sh"
+    check ".config/env/post_env.sh is stowed" is_stowed "$HOME/.config/env/post_env.sh"
+    check ".local/bin/tm is stowed" is_stowed "$HOME/.local/bin/tm"
+    check ".local/bin/ssh-refresh-agent is stowed" is_stowed "$HOME/.local/bin/ssh-refresh-agent"
 
     # Backups created for pre-existing files
     echo "-- Backups --"
