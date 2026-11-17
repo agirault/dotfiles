@@ -41,6 +41,7 @@ if [[ "$phase" == "configs" ]]; then
     echo "-- Symlinks --"
     check ".gitconfig is a symlink" test -L "$HOME/.gitconfig"
     check ".tmux.conf is a symlink" test -L "$HOME/.tmux.conf"
+    check ".ssh/config is a symlink" test -L "$HOME/.ssh/config"
     check ".config/fish/config.fish is a symlink" test -L "$HOME/.config/fish/config.fish"
     check ".config/fish/conf.d/env_loader.fish is a symlink" test -L "$HOME/.config/fish/conf.d/env_loader.fish"
     check ".claude/settings.json is a symlink" test -L "$HOME/.claude/settings.json"
@@ -64,6 +65,8 @@ if [[ "$phase" == "configs" ]]; then
 
     # Content checks
     echo "-- Content --"
+    check ".ssh/config includes config.local" grep -q 'Include ~/.ssh/config.local' "$HOME/.ssh/config"
+    check ".ssh/config has NO private host names" ! grep -q '^\s*HostName' "$HOME/.ssh/config"
     check ".gitconfig has [include] for .local" grep -q 'path = ~/.gitconfig.local' "$HOME/.gitconfig"
     check ".gitconfig has NO [user] section" ! grep -q '^\[user\]' "$HOME/.gitconfig"
     check ".claude/settings.json uses ~ not /home/" ! grep -q '/home/' "$HOME/.claude/settings.json"

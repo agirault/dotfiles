@@ -61,6 +61,7 @@ remote host, so remote shells render correctly instead of failing on an unknown
 - **Git**: aliases, delta pager, difftastic, rebase settings. Identity via `[include]` from `~/.gitconfig.local`. Commits are signed with an SSH key.
 - **Fish**: shell config, shared env loader
 - **Tmux**: Ctrl-a prefix, mouse, splits, OSC52 clipboard, bell notifications
+- **SSH**: shared defaults only. Private hosts go in `~/.ssh/config.local`, which this repo does not contain. The shared file includes that path first, so a host there can set its own values, and the `Host *` block last, so it only fills gaps. X11 forwarding belongs in `config.local`, next to the machines that need it.
 - **Claude**: Claude Code settings, Catppuccin status line, global agent instructions (CLAUDE.md), hooks:
   - `auto-cleanup-session.py` (SessionEnd) - deletes trivially empty sessions on exit
   - `auto-name-session.py` (Stop) - generates titles for unnamed sessions via Claude haiku after the 2nd assistant turn; lockfile-guarded against races. Runs early so `claude --resume <title>` / tab completion work before you exit.
