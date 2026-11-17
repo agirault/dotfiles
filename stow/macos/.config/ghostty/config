@@ -1,0 +1,68 @@
+# Ghostty terminal configuration.
+#
+# Ghostty reads this path on macOS as well as the Application Support folder.
+# Reload after an edit with Cmd+Shift+, or restart Ghostty.
+
+# -- Shell --
+# Start fish as a login shell, so it reads the full environment.
+command = /opt/homebrew/bin/fish --login
+
+# -- SSH --
+# Ghostty sets TERM to xterm-ghostty, which most remote hosts do not know. A
+# remote shell then draws a broken screen, or refuses to start an editor.
+#
+# These two features make the shell wrap the ssh command and fix that:
+#   ssh-terminfo  installs Ghostty's terminfo on the remote host with tic, on
+#                 the first connection, then caches the result per host.
+#   ssh-env       forwards COLORTERM, TERM_PROGRAM, and TERM_PROGRAM_VERSION,
+#                 and falls back to TERM=xterm-256color if the install fails.
+#
+# Omitted features keep their default value, so cursor, title, and path stay on.
+#
+# Two limits to know. The remote host needs tic for the install to work, and
+# its sshd must list the variables in AcceptEnv for the forwarding to work.
+# Neither is fatal: ssh falls back to xterm-256color.
+#
+# The wrapper is a shell function, so it does not apply to scp, rsync, git over
+# ssh, or scripts. Run `ghostty +ssh` by hand in those cases.
+shell-integration-features = ssh-env,ssh-terminfo
+
+# -- Font --
+# Tide draws its prompt icons from a Nerd Font. The Brewfile installs this one.
+font-family = FiraCode Nerd Font Mono
+font-size = 13
+
+# -- Appearance --
+theme = Catppuccin Mocha
+background-opacity = 1.0
+window-padding-x = 6
+window-padding-y = 4
+cursor-style = block
+mouse-hide-while-typing = true
+
+# -- Window --
+# Reopen with the same size instead of the macOS default.
+window-save-state = always
+macos-titlebar-style = tabs
+window-inherit-working-directory = true
+
+# -- Scrollback --
+scrollback-limit = 10000000
+
+# -- Clipboard --
+# Copy a mouse selection straight to the clipboard, like most Linux terminals.
+copy-on-select = clipboard
+clipboard-paste-protection = true
+
+# -- Keybindings --
+# Split panes. tmux handles splits inside a session; these are for the cases
+# where tmux is not running.
+keybind = cmd+d=new_split:right
+keybind = cmd+shift+d=new_split:down
+keybind = cmd+alt+left=goto_split:left
+keybind = cmd+alt+right=goto_split:right
+keybind = cmd+alt+up=goto_split:up
+keybind = cmd+alt+down=goto_split:down
+
+# Send Option as Escape, so Alt-based shortcuts reach tmux and fish.
+macos-option-as-alt = true

@@ -2,16 +2,20 @@
 set -euo pipefail
 
 # System setup: packages, dotfiles, tools, and identity
+# Runs on Linux (Ubuntu/apt) and macOS (Homebrew).
+#
 # Usage:
 #   ./setup.sh              # run all phases
 #   ./setup.sh packages     # install system packages only
 #   ./setup.sh configs      # symlink dotfiles and tools via stow
-#   ./setup.sh identity     # set up git identity + GPG only
+#   ./setup.sh identity     # set up git identity and commit signing only
+#   ./setup.sh defaults     # apply macOS system preferences (macOS only)
 #   ./setup.sh unlink       # remove symlinks and restore backups
 #
 # Flags:
 #   --no-docker     skip Docker setup (e.g., when running inside a container)
 #   --no-identity   skip identity setup (e.g., non-interactive environments)
+#   --no-defaults   skip macOS system preferences
 
 if [[ $EUID -eq 0 ]]; then
     echo "This script must not be run as root."
@@ -23,6 +27,17 @@ SETUP_DIR="$DOTFILES_DIR/setup"
 STOW_DIR="$DOTFILES_DIR/stow"
 NO_DOCKER=false
 NO_IDENTITY=false
+NO_DEFAULTS=false
+
+# Which operating system are we on? Several phases differ between the two.
+case "$(uname -s)" in
+    Linux)  OS=linux ;;
+    Darwin) OS=macos ;;
+    *)
+        echo "ERROR: unsupported operating system: $(uname -s)"
+        exit 1
+        ;;
+esac
 
 # Parse flags
 args=()
@@ -30,6 +45,7 @@ for arg in "$@"; do
     case "$arg" in
         --no-docker) NO_DOCKER=true ;;
         --no-identity) NO_IDENTITY=true ;;
+        --no-defaults) NO_DEFAULTS=true ;;
         *) args+=("$arg") ;;
     esac
 done
@@ -37,9 +53,17 @@ set -- "${args[@]+"${args[@]}"}"
 
 # ---- Helpers ----
 
-# List all stow package names
+# List the stow package names that apply to this machine.
+# A package named "linux" or "macos" only installs on that operating system.
+# Every other package installs everywhere.
 stow_packages() {
-    find "$STOW_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort
+    local pkg
+    for pkg in $(find "$STOW_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort); do
+        case "$pkg" in
+            linux|macos) [[ "$pkg" == "$OS" ]] && echo "$pkg" ;;
+            *) echo "$pkg" ;;
+        esac
+    done
 }
 
 # List target file paths for a stow package (relative to ~)
@@ -49,14 +73,20 @@ stow_targets() {
 
 # ---- Phase: packages ----
 phase_packages() {
-    bash "$SETUP_DIR/packages.sh"
-    bash "$SETUP_DIR/sandbox.sh"
-    bash "$SETUP_DIR/fisher-plugins.sh"
-    if [[ "$NO_DOCKER" == true ]]; then
-        echo "==> Skipping Docker setup (--no-docker)."
-    else
-        bash "$SETUP_DIR/docker.sh"
+    bash "$SETUP_DIR/packages-$OS.sh"
+
+    # Linux-only steps. On macOS, Claude Code sandboxes with the system
+    # sandbox-exec, and Docker Desktop stores registry logins in the Keychain.
+    if [[ "$OS" == linux ]]; then
+        bash "$SETUP_DIR/sandbox.sh"
+        if [[ "$NO_DOCKER" == true ]]; then
+            echo "==> Skipping Docker setup (--no-docker)."
+        else
+            bash "$SETUP_DIR/docker.sh"
+        fi
     fi
+
+    bash "$SETUP_DIR/fisher-plugins.sh"
 
     # Claude CLI
     if ! command -v claude >/dev/null 2>&1; then
@@ -120,14 +150,25 @@ BASH
         echo "    Removed stale ~/AGENTS.md (now at ~/.claude/CLAUDE.md)"
     fi
 
-    bash "$SETUP_DIR/tmux-plugins.sh"
-
     echo "==> Configs set up."
 }
 
 # ---- Phase: identity ----
 phase_identity() {
     bash "$SETUP_DIR/identity.sh"
+}
+
+# ---- Phase: defaults (macOS system preferences) ----
+phase_defaults() {
+    if [[ "$OS" != macos ]]; then
+        echo "==> Defaults only applies to macOS."
+        return 0
+    fi
+    if [[ "$NO_DEFAULTS" == true ]]; then
+        echo "==> Skipping macOS defaults (--no-defaults)."
+        return 0
+    fi
+    bash "$SETUP_DIR/macos-defaults.sh"
 }
 
 # ---- Phase: unlink ----
@@ -166,9 +207,13 @@ case "$phase" in
     identity)
         phase_identity
         ;;
+    defaults)
+        phase_defaults
+        ;;
     all)
         phase_packages
         phase_configs
+        phase_defaults
         if [[ "$NO_IDENTITY" == true ]]; then
             echo "==> Skipping identity setup (--no-identity)."
         else
@@ -179,7 +224,7 @@ case "$phase" in
         phase_unlink
         ;;
     *)
-        echo "Usage: $0 [packages|configs|identity|unlink]"
+        echo "Usage: $0 [packages|configs|identity|defaults|unlink]"
         exit 1
         ;;
 esac

@@ -1,43 +1,66 @@
 # Personal System Setup
 
-Configuration files, shell tools, and a bootstrap installer for Linux dev machines. Managed with [GNU Stow](https://www.gnu.org/software/stow/).
+Configuration files, shell tools, and a bootstrap installer for Linux (Ubuntu)
+and macOS development machines. Managed with [GNU Stow](https://www.gnu.org/software/stow/).
 
 ## Quick start
 
 ```bash
-git clone https://github.com/agirault/dotfiles.git ~/dotfiles
-cd ~/dotfiles
+git clone https://github.com/agirault/dotfiles.git ~/projects/dotfiles
+cd ~/projects/dotfiles
 ./setup.sh
 ```
 
 ## Modular install
 
 ```bash
-./setup.sh packages     # system packages, fish, docker, claude CLI
+./setup.sh packages     # system packages, fish, claude CLI
 ./setup.sh configs      # symlink dotfiles and tools via stow
-./setup.sh identity     # git name/email/GPG key
+./setup.sh identity     # git name/email/commit signing key
+./setup.sh defaults     # macOS system preferences (macOS only)
 ./setup.sh unlink       # remove symlinks and restore backups
 ```
 
 ### Flags
 
 ```bash
-./setup.sh --no-docker all      # skip Docker setup
+./setup.sh --no-docker all      # skip Docker setup (Linux only)
 ./setup.sh --no-identity all    # skip identity setup (non-interactive)
+./setup.sh --no-defaults all    # skip macOS system preferences
 ```
+
+### macOS
+
+`setup.sh` reads `uname` and runs the matching package script. On macOS it
+installs `setup/Brewfile` with Homebrew, skips the Docker and bwrap sandbox
+setup, and runs `setup/macos-defaults.sh` to apply the system preferences.
+
+Two steps stay manual, because macOS protects them:
+
+- **Default browser.** `macos-defaults.sh` calls `defaultbrowser firefox`,
+  which opens an approval dialog. Click it.
+- **Privacy permissions.** Apps that move windows, record the screen, or use
+  the microphone need approval after their first launch. Open System Settings
+  → Privacy & Security and enable each app.
 
 ## Stow packages
 
 | Package | Target | Contents |
 |---------|--------|----------|
 | `dotfiles` | `~/` | Git, fish, tmux, bash, claude configs, shared env and login script |
-| `tools` | `~/.local/bin/` | Standalone commands: `tm` (tmux workspaces), `claude-sessions` (session browser), `ssh-refresh-agent` |
+| `tools` | `~/.local/bin/` | Standalone commands: `tm` (tmux workspaces) and `ssh-refresh-agent` |
+| `macos` | `~/` | macOS-only configuration, such as the Ghostty terminal config |
+
+Ghostty wraps `ssh` with a shell function that installs its terminfo on the
+remote host, so remote shells render correctly instead of failing on an unknown
+`xterm-ghostty`. The wrapper does not cover `scp`, `rsync`, or git over ssh; run
+`ghostty +ssh` by hand for those.
 
 ### What's in `dotfiles`
 
-- **Git**: aliases, delta pager, difftastic, rebase settings. Identity via `[include]` from `~/.gitconfig.local`
+- **Git**: aliases, delta pager, difftastic, rebase settings. Identity via `[include]` from `~/.gitconfig.local`. Commits are signed with an SSH key.
 - **Fish**: shell config, shared env loader
-- **Tmux**: Ctrl-a prefix, mouse, splits, OSC52 clipboard, bell notifications, automatic session/window restore after reboot via tmux-resurrect and tmux-continuum
+- **Tmux**: Ctrl-a prefix, mouse, splits, OSC52 clipboard, bell notifications
 - **Claude**: Claude Code settings, Catppuccin status line, global agent instructions (CLAUDE.md), hooks:
   - `auto-cleanup-session.py` (SessionEnd) - deletes trivially empty sessions on exit
   - `auto-name-session.py` (Stop) - generates titles for unnamed sessions via Claude haiku after the 2nd assistant turn; lockfile-guarded against races. Runs early so `claude --resume <title>` / tab completion work before you exit.
@@ -48,26 +71,14 @@ cd ~/dotfiles
 ### What's in `tools`
 
 - **`tm`**: tmux workspace manager. Run `tm --help` for usage. Alias: `tml` (list).
-- **`claude-session-completions`**: Fast (~20ms) tab-completion source for `claude --resume` / `clr`. Emits session titles (or UUIDs when untitled) with relative time + first-user-msg as the description. Scoped to cwd's project dir by default; pass `--all` for every project. Wired up via `stow/dotfiles/.config/fish/completions/{claude,clr}.fish`.
-- **`claude-sessions`**: Cross-directory Claude Code session browser. Python curses TUI with:
-  - Collapsible tree view grouped by directory, with search/filter bar and match highlighting
-  - Live preview pane showing conversation history (navigable with arrow keys or mouse scroll)
-  - Session metadata columns (time, messages, optional branch via `b`)
-  - Actions: Enter to resume, `d` to delete, `r` to rename, `c` to collapse/expand all
-  - Uses `claude_utils/index.py` to scan all `~/.claude/projects/` session files
-- **`ssh-refresh-agent`**:
-Manual command to fix SSH agent in stale tmux sessions. Run `ssh-refresh-agent` to find a live socket and update the symlink, or `ssh-refresh-agent --check` to test. Called automatically by `pre_env.sh` on shell startup.
+- **`ssh-refresh-agent`**: Manual command to fix SSH agent in stale tmux sessions. Run `ssh-refresh-agent` to find a live socket and update the symlink, or `ssh-refresh-agent --check` to test. Called automatically by `pre_env.sh` on shell startup.
 
-### Tmux restore
+### macOS defaults
 
-Tmux plugins are installed under `~/.tmux/plugins/` by `./setup.sh configs` and `./setup.sh all`.
-
-- `tmux-resurrect` saves and restores sessions, windows, panes, layouts, and pane working directories.
-- `tmux-continuum` autosaves every 15 minutes by default and automatically restores the latest saved state when a new tmux server starts.
-- Manual save: prefix + `Ctrl-s`.
-- Manual restore: prefix + `Ctrl-r`.
-
-Pane scrollback capture is intentionally disabled so terminal contents are not persisted.
+`./setup.sh defaults` runs `setup/macos-defaults.sh`, which applies the system
+preferences that can be scripted: scroll direction, tap to click, the
+screenshot folder, dark mode, and the Dock and Finder layout. Each setting is
+commented with what it changes.
 
 ## Shared environment
 
@@ -90,7 +101,9 @@ POSIX shell scripts executed by the env loader before and after parsing `env.con
 
 ## Identity
 
-Git identity (name, email, GPG signing key) is stored in `~/.gitconfig.local` (gitignored). Created interactively by `./setup.sh identity`.
+Git identity (name, email, SSH signing key) is stored in `~/.gitconfig.local` (gitignored). Created interactively by `./setup.sh identity`. Commit signing uses an SSH key, so the same key that authenticates to the git remote also signs your commits.
+
+On a new machine, copy `~/.ssh/id_ed25519` and `~/.ssh/id_ed25519.pub` across by hand, then add the public key to GitHub twice: once as an Authentication key, and once as a Signing key. GitHub stores them as separate entries.
 
 ## Testing
 
@@ -109,12 +122,6 @@ Tests validate configs (symlinks, backups, content) and unlink (restore original
 
 ## Future work
 
-- **GPG signing**
-  - change default agent lock timing
-  - util/tool for unlocking
-  - sharing key safely across systems with this repo (see git-crypt & git-secret)
-- password mngmt
-  - see https://medium.com/@chasinglogic/the-definitive-guide-to-password-store-c337a8f023a1 ?
 - **alias**
   - understand whether it works for commands with multiple components
 - **tm**:
@@ -134,7 +141,7 @@ Tests validate configs (symlinks, backups, content) and unlink (restore original
 
 ## Known issues
 
-- **`snap` in Docker**: `packages.sh` installs `glab` via `snap`, which is unavailable in Docker containers. `run_tests.sh` will fail on this step. Needs a `--no-snap` flag or a runtime check for `snapd`.
+- **`snap` in Docker**: `packages-linux.sh` installs `glab` via `snap`, which is unavailable in Docker containers. `run_tests.sh` will fail on this step. Needs a `--no-snap` flag or a runtime check for `snapd`.
 - **`claude` CLI install in Docker**: The Claude CLI install script may not work in containers. Same category as above.
 - **Nerd Font in Docker**: `fisher-plugins.sh` downloads FiraCode Nerd Font, which is unnecessary in headless/container environments.
 

@@ -1,0 +1,65 @@
+# Homebrew packages for macOS. Installed by setup/packages-macos.sh.
+# This list mirrors setup/packages-linux.sh. Keep the two in step.
+#
+# Install everything:  brew bundle --file=setup/Brewfile
+# Find extras:         brew bundle cleanup --file=setup/Brewfile
+
+# -- Shell --
+# The prompt is tide, installed as a fish plugin by setup/fisher-plugins.sh.
+brew "fish"
+brew "fzf"
+
+# -- Dotfile management --
+brew "stow"
+
+# -- Git and forges --
+# macOS ships git, so only the extras are listed here.
+brew "git-delta" # diff pager, set as core.pager in .gitconfig
+brew "git-lfs"
+brew "difftastic"
+brew "tig"
+brew "gh"
+brew "glab"
+
+# -- Terminal multiplexer --
+brew "tmux"
+
+# -- Search and file tools --
+brew "ripgrep"
+brew "fd"
+brew "sd"
+brew "tree"
+brew "lsd"
+brew "duf"
+brew "dust"
+brew "ncdu"
+
+# -- Network and system --
+brew "wget"
+brew "curlie"
+brew "htop"
+
+# -- Misc CLI --
+brew "jq"
+brew "tldr"
+brew "vim"
+brew "node"
+
+# -- macOS-only helpers used by setup/macos-defaults.sh --
+brew "dockutil"       # set the Dock contents from a script
+brew "defaultbrowser" # set Firefox as the default browser
+
+# -- Applications --
+cask "ghostty"
+cask "firefox"
+cask "rectangle"   # window snapping
+cask "bitwarden"
+cask "signal"
+cask "spotify"
+cask "superwhisper"
+cask "vlc"
+cask "devin-desktop" # installs /Applications/Devin.app
+
+# -- Fonts --
+# Tide draws its icons from a Nerd Font. Ghostty is configured to use this one.
+cask "font-fira-code-nerd-font"
