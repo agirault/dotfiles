@@ -44,7 +44,10 @@ brew "htop"
 
 # -- Misc CLI --
 brew "jq"
-brew "tldr"
+# Provides the "tldr" command. Homebrew removed the formula named "tldr",
+# and tlrc is the client that the tldr-pages project maintains. The Linux
+# script still installs the apt package named tldr.
+brew "tlrc"
 brew "vim"
 brew "node"
 
