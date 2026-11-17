@@ -87,6 +87,21 @@
   pop = stash pop
 [commit]
   verbose = true
+  # Sign every commit. The key itself is set in ~/.gitconfig.local by
+  # setup/identity.sh. Keeping `gpgsign` here and the key there means agents
+  # that run with GIT_CONFIG_GLOBAL=~/.gitconfig.local do not sign, so human
+  # commits stay distinguishable from agent commits.
+  gpgsign = true
+[tag]
+  gpgSign = true
+[gpg]
+  # Sign with an SSH key instead of a GPG key. The same key that authenticates
+  # to the remote also signs, so there is only one secret to manage.
+  format = ssh
+[gpg "ssh"]
+  # Git verifies a signature by looking the key up here. Written by
+  # setup/identity.sh.
+  allowedSignersFile = ~/.config/git/allowed_signers
 [pull]
   default = current
   rebase = true
@@ -126,9 +141,11 @@
   conflictstyle = diff3
 [include]
   path = ~/.gitconfig.local
+# Resolve `gh` through PATH. An absolute path breaks across systems, because
+# apt installs it in /usr/bin and Homebrew installs it under its own prefix.
 [credential "https://github.com"]
-	helper = 
-	helper = !/usr/bin/gh auth git-credential
+  helper =
+  helper = !gh auth git-credential
 [credential "https://gist.github.com"]
-	helper = 
-	helper = !/usr/bin/gh auth git-credential
+  helper =
+  helper = !gh auth git-credential
