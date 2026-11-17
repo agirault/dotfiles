@@ -11,6 +11,19 @@ cd ~/projects/dotfiles
 ./setup.sh
 ```
 
+On a new Mac, run the Homebrew installer first. A new Mac has no `git`, so
+the clone above cannot run yet, and `git` is part of Apple's Command Line
+Tools. The Homebrew installer installs those tools without a dialog, so you
+do not need `xcode-select --install`.
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+eval "$(/opt/homebrew/bin/brew shellenv)"
+```
+
+The `eval` line puts `brew` on the PATH of the current shell only. After
+`./setup.sh configs`, `.config/env/env.conf` does this for every new shell.
+
 ## Modular install
 
 ```bash
