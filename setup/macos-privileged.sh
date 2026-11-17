@@ -12,16 +12,18 @@ if [[ "$(uname -s)" != Darwin ]]; then
     exit 0
 fi
 
-echo "==> Privileged macOS setup. Your password unlocks sudo for this script."
-sudo -v
+# Find the pam_reattach module while still running as you. Homebrew warns and
+# behaves differently under root, so do not ask it anything after elevation.
+: "${PAM_REATTACH:=$(brew --prefix 2>/dev/null)/lib/pam/pam_reattach.so}"
+export PAM_REATTACH
 
-# Hold the sudo timestamp open until this script ends, so a slow step does not
-# cause a second prompt. The loop stops when the script stops.
-while true; do
-    sudo -n true
-    sleep 50
-    kill -0 "$$" 2>/dev/null || exit
-done 2>/dev/null &
+# Elevate once, by replacing this process with the same script under sudo.
+# Calling sudo on each command instead would ask for the password every time,
+# because a sudo policy can switch off the password cache, and this Mac does.
+if [[ "$(id -u)" -ne 0 ]]; then
+    echo "==> Privileged macOS setup. You type your password once."
+    exec sudo --preserve-env=PAM_REATTACH -- "$0" "$@"
+fi
 
 # ---- Touch ID for sudo ----
 #
@@ -32,14 +34,14 @@ echo "==> Touch ID for sudo"
 pam_local=/etc/pam.d/sudo_local
 
 if [[ ! -f "$pam_local" ]]; then
-    sudo cp /etc/pam.d/sudo_local.template "$pam_local"
+    cp /etc/pam.d/sudo_local.template "$pam_local"
     echo "    Created $pam_local from Apple's template."
 fi
 
-if grep -qE '^auth\s+sufficient\s+pam_tid.so' "$pam_local"; then
+if grep -qE '^auth[[:space:]]+sufficient[[:space:]]+pam_tid.so' "$pam_local"; then
     echo "    Touch ID already enabled."
 else
-    sudo sed -i '' 's/^#auth/auth/' "$pam_local"
+    sed -i '' 's/^#auth/auth/' "$pam_local"
     echo "    Enabled Touch ID."
 fi
 
@@ -49,17 +51,18 @@ fi
 #
 # The module is "optional" on purpose. If Homebrew ever moves it, sudo still
 # accepts your password instead of locking you out.
-reattach="$(brew --prefix 2>/dev/null)/lib/pam/pam_reattach.so"
-
-if [[ ! -f "$reattach" ]]; then
+if [[ ! -f "$PAM_REATTACH" ]]; then
     echo "    pam_reattach not found. Install it with: brew install pam-reattach"
 elif grep -q 'pam_reattach.so' "$pam_local"; then
     echo "    pam_reattach already configured."
 else
     # pam_reattach must run before pam_tid, so insert it above that line.
-    sudo sed -i '' "s|^auth\(.*\)pam_tid.so|auth       optional       $reattach\nauth\1pam_tid.so|" "$pam_local"
+    sed -i '' "s|^auth\(.*\)pam_tid.so|auth       optional       $PAM_REATTACH\nauth\1pam_tid.so|" "$pam_local"
     echo "    Added pam_reattach, so Touch ID works inside tmux."
 fi
+
+echo "    Touch ID needs the Mac in front of you. Over ssh there is no"
+echo "    fingerprint reader, so sudo asks for your password as before."
 
 # ---- Sleep settings for a machine you connect into ----
 #
@@ -72,8 +75,8 @@ read -r -p "    Stop this Mac sleeping while on power? [y/N] " answer
 
 if [[ "$answer" =~ ^[Yy]$ ]]; then
     # -c means "while on power", so behaviour on battery does not change.
-    sudo pmset -c sleep 0   # do not sleep
-    sudo pmset -c womp 1    # wake when a network packet arrives
+    pmset -c sleep 0   # do not sleep
+    pmset -c womp 1    # wake when a network packet arrives
     echo "    Set. Check with 'pmset -g custom' later, because device"
     echo "    management can replace this with its own power policy."
 else
