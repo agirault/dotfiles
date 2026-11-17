@@ -31,6 +31,7 @@ The `eval` line puts `brew` on the PATH of the current shell only. After
 ./setup.sh configs      # symlink dotfiles and tools via stow
 ./setup.sh identity     # git name/email/commit signing key
 ./setup.sh defaults     # macOS system preferences (macOS only)
+./setup.sh privileged   # macOS changes needing root (macOS only, asks password)
 ./setup.sh unlink       # remove symlinks and restore backups
 ```
 
