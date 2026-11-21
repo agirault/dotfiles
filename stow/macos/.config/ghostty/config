@@ -28,9 +28,21 @@ command = /opt/homebrew/bin/fish --login
 shell-integration-features = ssh-env,ssh-terminfo
 
 # -- Font --
-# Tide draws its prompt icons from a Nerd Font. The Brewfile installs this one.
-font-family = FiraCode Nerd Font Mono
-font-size = 13
+# Use the plain Fira Code, not the Nerd Font patched build.
+#
+# Tide draws its prompt icons from the Nerd Font symbol range. Ghostty carries
+# its own symbols-only Nerd Font and scales each symbol to the cell, the same
+# way the Nerd Fonts patcher does. It only does this for symbols that the
+# primary font does not supply. A patched primary font supplies them, so
+# Ghostty keeps them at the size the font file gives, and the Mono patched
+# build squeezes every symbol into one cell. That is why the icons looked
+# tiny, and why adjust-icon-height could not fix it.
+#
+# Check which face draws a glyph:
+#   ghostty +show-face --cp=0xF09B   # expect "Symbols Nerd Font"
+#   ghostty +show-face --cp=0x41     # expect "Fira Code"
+font-family = Fira Code
+font-size = 18
 
 # -- Appearance --
 theme = Catppuccin Mocha

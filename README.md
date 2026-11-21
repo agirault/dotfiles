@@ -122,8 +122,8 @@ remote host, so remote shells render correctly instead of failing on an unknown
 
 `./setup.sh defaults` runs `setup/macos-defaults.sh`, which applies the system
 preferences that can be scripted: scroll direction, tap to click, the
-screenshot folder, dark mode, and the Dock and Finder layout. Each setting is
-commented with what it changes.
+screenshot folder, dark mode, the sound icon in the menu bar, and the Dock and
+Finder layout. Each setting is commented with what it changes.
 
 ## Shared environment
 
