@@ -59,6 +59,27 @@ defaults write com.apple.screencapture captureDelay -int 5
 # not tell running applications to redraw.
 osascript -e 'tell application "System Events" to tell appearance preferences to set dark mode to true' >/dev/null 2>&1 || true
 
+# ---- Night Shift ----
+
+# Warm the display colour from sunset to sunrise.
+#
+# `defaults write` cannot set this. Night Shift has no user preferences domain.
+# It lives in a root-owned plist, keyed by the user UUID, that a daemon owns and
+# rewrites, so every recipe that writes com.apple.CoreBrightness silently does
+# nothing. Drive the same private framework that System Settings drives.
+#
+# setMode(1) selects the sunset-to-sunrise schedule, where 0 is off and 2 is a
+# custom time range. setStrengthCommit sets the warmth, from 0.0 to 1.0.
+#
+# Sunset to sunrise needs Location Services. Without it the schedule never
+# fires. That permission has to be granted by hand, like the others below.
+osascript -l JavaScript \
+    -e 'ObjC.import("Foundation")' \
+    -e '$.NSBundle.bundleWithPath("/System/Library/PrivateFrameworks/CoreBrightness.framework").load' \
+    -e 'var c = $.NSClassFromString("CBBlueLightClient").alloc.init' \
+    -e 'c.setMode(1)' \
+    -e 'c.setStrengthCommit(0.65, true)' >/dev/null 2>&1 || true
+
 # ---- Text input ----
 
 # Turn off smart dashes and smart quotes. They corrupt code and commands
