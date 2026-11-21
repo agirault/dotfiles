@@ -38,6 +38,9 @@ setup_apt_list "nodesource" "https://deb.nodesource.com" \
     "gpgkey/nodesource-repo.gpg.key" "node_22.x nodistro main"
 
 sudo apt-add-repository -n ppa:fish-shell/release-3 -y 2>/dev/null || true
+# Ubuntu added fastfetch to its own archive only in 25.04, so 24.04 needs the
+# PPA of the fastfetch maintainer.
+sudo apt-add-repository -n ppa:zhangsongcui3371/fastfetch -y 2>/dev/null || true
 
 sudo apt-get update -qq
 
@@ -48,7 +51,7 @@ sudo apt-get install -y \
     tmux \
     tldr ripgrep fd-find sd tree lsd duf \
     wget curl unzip apt-transport-https openssh-server \
-    lshw pciutils iperf3 ncdu htop \
+    lshw pciutils iperf3 ncdu htop fastfetch \
     apt-rdepends \
     git-gui git-delta tig gh \
     build-essential libtool m4 automake \

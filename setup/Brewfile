@@ -44,6 +44,8 @@ brew "htop"
 
 # -- Misc CLI --
 brew "jq"
+# Prints the system info banner at login. See .config/env/post_env.sh.
+brew "fastfetch"
 # Provides the "tldr" command. Homebrew removed the formula named "tldr",
 # and tlrc is the client that the tldr-pages project maintains. The Linux
 # script still installs the apt package named tldr.
@@ -70,5 +72,9 @@ cask "devin-desktop" # installs /Applications/Devin.app
 cask "xquartz"
 
 # -- Fonts --
-# Tide draws its icons from a Nerd Font. Ghostty is configured to use this one.
+# Ghostty uses the plain build and draws the Tide prompt icons from the
+# symbols font it carries itself. See stow/macos/.config/ghostty/config.
+cask "font-fira-code"
+# The Nerd Font patched build, for programs other than Ghostty that need the
+# icons to come from the font.
 cask "font-fira-code-nerd-font"
