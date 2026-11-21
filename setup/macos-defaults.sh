@@ -124,6 +124,11 @@ if [[ -f "$rectangle_plist" ]]; then
     defaults import com.knollsoft.Rectangle "$rectangle_plist"
 fi
 
+# ---- Control Center ----
+
+# Sound: always show the speaker icon in the menu bar.
+defaults -currentHost write com.apple.controlcenter Sound -int 18
+
 # ---- Default browser ----
 
 # macOS protects the browser setting, so `defaults write` cannot change it.
@@ -136,7 +141,7 @@ fi
 
 # ---- Restart the affected applications ----
 
-for app in Dock Finder SystemUIServer; do
+for app in Dock Finder SystemUIServer ControlCenter; do
     killall "$app" >/dev/null 2>&1 || true
 done
 
